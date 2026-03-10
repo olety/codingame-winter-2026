@@ -8,3 +8,11 @@ statement_en.html
 statement_fr.html
 src/main/resources/view/node_modules/
 JulienMain.java
+/target/
+/Cargo.lock
+/__pycache__/
+*.pyc
+/python/train/data/
+/python/train/artifacts/
+*.sqlite
+cp.txt
