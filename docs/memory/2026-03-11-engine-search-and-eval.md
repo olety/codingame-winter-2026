@@ -148,12 +148,20 @@ The highest-signal next search action is to confirm other distinct finalists fro
 
 ## Live benchmark note
 
-The submitted bot was also reported at:
+The pre-promotion submitted bot was reported at:
 
 - global rank `168 / 1108`
 - Bronze rank `168 / 1108`
 
 That is a useful sanity check that the incumbent/base is already a real competitive baseline, not just a locally overfit config.
+
+After promoting `sweep_tmy6_topp8_cmy3_copp3_lat40` into `submission_current.json`, the next live leaderboard report was:
+
+- global rank `147 / 1108`
+- Bronze rank `147 / 1108`
+- score `29.57`
+
+This is the first live post-promotion comparison point and should be treated as the reference score for future search changes.
 
 ## Still intentionally basic
 

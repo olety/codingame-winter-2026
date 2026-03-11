@@ -10,6 +10,8 @@ Start here for repo-local memory.
   - Rust engine semantics, search behavior, arena harness, Java smoke canary, staged search sweep helper, and current verification status.
 - [2026-03-11 Training and Data Pipeline](./2026-03-11-training-and-data-pipeline.md)
   - Self-play/export schema, sweep/training flow, grouped split rules, and experiment ledger behavior.
+- [2026-03-12 Live Results and Architecture Storyline](./2026-03-12-live-results-and-architecture-story.md)
+  - Current architecture, current bot lineup, and rank/score history in a format meant to be reusable for future writeups or a blog post.
 
 ## Usage
 

@@ -86,7 +86,9 @@ Detailed follow-up docs:
 
 ## Latest Evaluation Read
 
-- Current live CodinGame result reported from the submitted bot: global rank `168 / 1108`, Bronze rank `168 / 1108`
+- Pre-promotion live CodinGame result from the prior submission: global rank `168 / 1108`, Bronze rank `168 / 1108`
+- Post-promotion live CodinGame result for the promoted `6/8/3/3` submission: global rank `147 / 1108`, Bronze rank `147 / 1108`, score `29.57`
+- Net live change after the first real promotion: `+21` leaderboard places and `29.57` as the recorded comparison score for this submission
 - Clean authoritative confirmations run after the interrupted sweep:
   - `sweep_tmy4_topp4_cmy5_copp5_lat40_lat38`: rejected, heldout body diff `-0.830078125`
   - `sweep_tmy4_topp4_cmy5_copp5_lat40`: rejected, heldout body diff `-0.716796875`
