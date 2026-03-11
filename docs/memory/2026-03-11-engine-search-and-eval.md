@@ -89,6 +89,23 @@ SNAKEBOT_STRICT_RECONCILE=1
 
 It now also verifies that the built bot artifact embeds the same candidate artifact and behavior hashes that the arena evaluation used.
 
+## Flattened submission artifact
+
+There is now a mechanical single-file submission generator:
+
+- `tools/generate_flattened_submission.py`
+
+It emits:
+
+- `submission/flattened_main.rs`
+
+This artifact is intended for CodinGame paste submissions. It is compile-checked locally with plain `rustc` and should be regenerated whenever either of these change:
+
+- `rust/bot/configs/submission_current.json`
+- any live bot or engine module used by the contest binary
+
+The compiled check binary at `submission/flattened_main` is local-only and ignored.
+
 ## Recent runtime checks
 
 Short checks that passed after the behavior-hash/timing split landed:

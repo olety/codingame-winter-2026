@@ -61,6 +61,14 @@ python3 -m python.train.sweep_search
 
 That script prebuilds the release `arena` binary once, runs a smoke-suite topology screening pass first, then a heldout/shadow authoritative finalist pass, and can optionally promote the winning config.
 
+Generate a single-file Rust submission artifact:
+
+```bash
+python3 tools/generate_flattened_submission.py
+```
+
+That emits [`submission/flattened_main.rs`](./submission/flattened_main.rs) from the live Rust bot and compile-checks it with `rustc`. Regenerate it whenever `submission_current.json` or the live bot/engine logic changes.
+
 ## Self-play and training
 
 The self-play/export/training workflow is documented in:

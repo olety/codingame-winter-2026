@@ -16,3 +16,4 @@ JulienMain.java
 /python/train/artifacts/
 *.sqlite
 cp.txt
+/submission/flattened_main
