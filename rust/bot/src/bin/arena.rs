@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use rayon::prelude::*;
 use serde::Serialize;
-use snakebot_bot::config::BotConfig;
+use snakebot_bot::config::{hash_config_file, BotConfig};
 use snakebot_bot::search::{choose_action, live_budget_for_turn};
 use snakebot_engine::initial_state_from_seed;
 
@@ -13,6 +13,8 @@ use snakebot_engine::initial_state_from_seed;
 struct ArenaConfig {
     bot_a: BotConfig,
     bot_b: BotConfig,
+    bot_a_hash: String,
+    bot_b_hash: String,
     suite_path: PathBuf,
     league: i32,
     jobs: usize,
@@ -49,9 +51,14 @@ struct SideMetrics {
 #[derive(Serialize)]
 struct ArenaSummary {
     suite: String,
+    suite_name: String,
     league: i32,
     jobs: usize,
     matches: usize,
+    bot_a_name: String,
+    bot_b_name: String,
+    bot_a_config_hash: String,
+    bot_b_config_hash: String,
     average_body_diff: f64,
     wins: usize,
     draws: usize,
@@ -96,8 +103,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn parse_args() -> Result<ArenaConfig, Box<dyn Error>> {
-    let mut bot_a = BotConfig::default();
-    let mut bot_b = BotConfig::default();
+    let mut bot_a = BotConfig::embedded();
+    let mut bot_b = BotConfig::embedded();
+    let mut bot_a_hash = BotConfig::embedded_hash().to_owned();
+    let mut bot_b_hash = BotConfig::embedded_hash().to_owned();
     let mut suite_path = None;
     let mut league = 4_i32;
     let mut jobs = std::thread::available_parallelism()
@@ -109,10 +118,14 @@ fn parse_args() -> Result<ArenaConfig, Box<dyn Error>> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--bot-a-config" => {
-                bot_a = BotConfig::load(args.next().ok_or("missing value for --bot-a-config")?)?
+                let path = args.next().ok_or("missing value for --bot-a-config")?;
+                bot_a_hash = hash_config_file(&path)?;
+                bot_a = BotConfig::load(path)?
             }
             "--bot-b-config" => {
-                bot_b = BotConfig::load(args.next().ok_or("missing value for --bot-b-config")?)?
+                let path = args.next().ok_or("missing value for --bot-b-config")?;
+                bot_b_hash = hash_config_file(&path)?;
+                bot_b = BotConfig::load(path)?
             }
             "--suite" => {
                 suite_path = Some(PathBuf::from(
@@ -134,6 +147,8 @@ fn parse_args() -> Result<ArenaConfig, Box<dyn Error>> {
     Ok(ArenaConfig {
         bot_a,
         bot_b,
+        bot_a_hash,
+        bot_b_hash,
         suite_path: suite_path.ok_or("missing required --suite")?,
         league,
         jobs: jobs.max(1),
@@ -266,9 +281,19 @@ fn summarize(config: &ArenaConfig, matches: &[MatchSummary]) -> ArenaSummary {
 
     ArenaSummary {
         suite: config.suite_path.display().to_string(),
+        suite_name: config
+            .suite_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("unknown_suite")
+            .to_owned(),
         league: config.league,
         jobs: config.jobs,
         matches: matches.len(),
+        bot_a_name: config.bot_a.name.clone(),
+        bot_b_name: config.bot_b.name.clone(),
+        bot_a_config_hash: config.bot_a_hash.clone(),
+        bot_b_config_hash: config.bot_b_hash.clone(),
         average_body_diff: total_body_diff as f64 / matches.len().max(1) as f64,
         wins,
         draws,

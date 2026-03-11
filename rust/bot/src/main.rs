@@ -24,7 +24,7 @@ struct Bot {
 impl Bot {
     fn new(io: BotIo) -> Self {
         Self {
-            config: BotConfig::default(),
+            config: BotConfig::embedded(),
             io,
             state: None,
             last_my_action: PlayerAction::default(),

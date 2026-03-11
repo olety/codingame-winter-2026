@@ -30,14 +30,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config-path",
         type=Path,
-        default=REPO_ROOT / "rust/bot/configs/default_search_v2.json",
+        default=REPO_ROOT / "rust/bot/configs/submission_current.json",
     )
-    parser.add_argument("--maps-path", type=Path, default=REPO_ROOT / "python/train/artifacts/maps_l4.jsonl")
+    parser.add_argument("--maps-path", type=Path, default=None)
     parser.add_argument("--dataset-path", type=Path, default=REPO_ROOT / EXPERIMENT["dataset_path"])
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / EXPERIMENT["output_dir"])
     parser.add_argument("--results-db", type=Path, default=REPO_ROOT / EXPERIMENT["results_db"])
     parser.add_argument("--name", type=str, default="parallel_selfplay_value")
     parser.add_argument("--reuse-maps", action="store_true")
+    parser.add_argument("--merge-output", action="store_true")
     parser.add_argument("--train", action="store_true")
     return parser.parse_args()
 
@@ -67,6 +68,8 @@ def build_exporter() -> Path:
 
 
 def dump_maps(args: argparse.Namespace, classpath: Path) -> None:
+    if args.maps_path is None:
+        return
     if args.reuse_maps and args.maps_path.exists():
         return
     args.maps_path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,8 +108,6 @@ def export_shards(args: argparse.Namespace, exporter_bin: Path) -> list[Path]:
         shard_paths.append(shard_path)
         cmd = [
             str(exporter_bin),
-            "--maps",
-            str(args.maps_path),
             "--out",
             str(shard_path),
             "--limit",
@@ -122,6 +123,19 @@ def export_shards(args: argparse.Namespace, exporter_bin: Path) -> list[Path]:
             "--num-shards",
             str(workers),
         ]
+        if args.maps_path is not None:
+            cmd.extend(["--maps", str(args.maps_path)])
+        else:
+            cmd.extend(
+                [
+                    "--seed-start",
+                    str(args.seed_start),
+                    "--seed-count",
+                    str(args.seed_count),
+                    "--league",
+                    str(args.league),
+                ]
+            )
         if args.search_ms > 0:
             cmd.extend(["--search-ms", str(args.search_ms)])
         else:
@@ -168,6 +182,18 @@ def merge_shards(dataset_path: Path, shard_paths: list[Path]) -> int:
     return sample_count
 
 
+def count_samples(shard_paths: list[Path]) -> int:
+    sample_count = 0
+    for shard_path in shard_paths:
+        if not shard_path.exists():
+            continue
+        with shard_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    sample_count += 1
+    return sample_count
+
+
 def run_training(args: argparse.Namespace, sample_count: int) -> dict:
     config = deepcopy(EXPERIMENT)
     config["name"] = args.name
@@ -196,21 +222,32 @@ def run_training(args: argparse.Namespace, sample_count: int) -> dict:
 
 def main() -> None:
     args = parse_args()
-    classpath = ensure_java_oracle()
     exporter_bin = build_exporter()
-    dump_maps(args, classpath)
+    if args.reuse_maps and args.maps_path is None:
+        raise ValueError("--reuse-maps requires --maps-path")
+    if args.maps_path is not None:
+        classpath = ensure_java_oracle()
+        dump_maps(args, classpath)
     shard_paths = export_shards(args, exporter_bin)
-    sample_count = merge_shards(args.dataset_path, shard_paths)
+    shard_dir = args.dataset_path.parent / f"{args.dataset_path.stem}_shards"
+    sample_count = count_samples(shard_paths)
+
+    dataset_source: Path = shard_dir
+    if args.merge_output:
+        sample_count = merge_shards(args.dataset_path, shard_paths)
+        dataset_source = args.dataset_path
 
     payload: dict[str, object] = {
-        "maps_path": str(args.maps_path),
-        "dataset_path": str(args.dataset_path),
+        "map_source": "java_dump" if args.maps_path is not None else "rust_seed_range",
+        "maps_path": str(args.maps_path) if args.maps_path is not None else None,
+        "dataset_path": str(dataset_source),
         "workers": min(max(1, args.workers), args.games if args.games > 0 else args.seed_count),
         "sample_count": sample_count,
         "shards": [str(path) for path in shard_paths],
     }
 
     if args.train:
+        args.dataset_path = dataset_source
         payload["training"] = run_training(args, sample_count)
 
     print(json.dumps(payload, indent=2, sort_keys=True))

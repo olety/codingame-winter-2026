@@ -5,9 +5,9 @@ This repository contains a local development stack for the CodinGame Winter Chal
 Current status:
 
 - Java-parity Rust simulator
-- Rust contest bot with turn-aware search budgets
+- Rust contest bot with embedded submission config and corrected depth-2 refinement
 - release-mode Rust arena harness with frozen seed suites
-- Java-referee smoke canary for real I/O and reconciliation checks
+- Java-referee smoke canary that validates the built candidate artifact hash
 - deterministic self-play export and local Python value-training pipeline
 
 ## Repository layout
@@ -35,16 +35,19 @@ cargo run -q -p snakebot-engine --bin java_diff -- --init-source rust --seeds 50
 Run the Java smoke canary:
 
 ```bash
-python3 -m python.train.java_smoke --boss-count 1 --mirror-count 1
+python3 -m python.train.java_smoke \
+  --boss-count 1 \
+  --mirror-count 1 \
+  --candidate-config rust/bot/configs/submission_current.json
 ```
 
 Run the Rust arena harness:
 
 ```bash
 python3 -m python.train.run_arena \
-  --candidate-config rust/bot/configs/default_search_v2.json \
-  --incumbent-config rust/bot/configs/anchor_search_v1.json \
-  --anchor-config rust/bot/configs/anchor_search_v1.json
+  --candidate-config rust/bot/configs/submission_current.json \
+  --incumbent-config rust/bot/configs/incumbent_current.json \
+  --anchor-config rust/bot/configs/anchor_root_only.json
 ```
 
 ## Self-play and training
@@ -55,7 +58,8 @@ The self-play/export/training workflow is documented in:
 
 That includes:
 
-- Java map dumps
+- Rust-seed self-play as the default hot path
+- optional Java oracle map dumps
 - release-mode self-play export
 - parallel local data generation
 - grouped/deduped value-model training

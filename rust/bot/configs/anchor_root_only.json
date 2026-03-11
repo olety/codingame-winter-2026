@@ -1,0 +1,22 @@
+{
+  "name": "anchor_root_only",
+  "eval": {
+    "body": 120.0,
+    "loss": 18.0,
+    "mobility": 7.5,
+    "apple": 16.0,
+    "stability": 10.0,
+    "breakpoint": 9.0,
+    "fragile_attack": 8.0,
+    "terminal": 10000.0
+  },
+  "search": {
+    "first_turn_ms": 850,
+    "later_turn_ms": 40,
+    "deepen_top_my": 0,
+    "deepen_top_opp": 0,
+    "deepen_child_my": 0,
+    "deepen_child_opp": 0,
+    "extra_nodes_after_root": 0
+  }
+}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -28,9 +29,53 @@ def ensure_java_oracle() -> Path:
     return Path(f"target/classes:target/test-classes:{classpath}")
 
 
-def build_release_bot() -> Path:
-    run(["cargo", "build", "--release", "-q", "-p", "snakebot-bot"])
-    return REPO_ROOT / "target/release/snakebot-bot"
+def stable_hash_bytes(data: bytes) -> str:
+    value = 0xCBF29CE484222325
+    for byte in data:
+        value ^= byte
+        value = (value * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return f"{value:016x}"
+
+
+def config_hash(path: Path) -> str:
+    return stable_hash_bytes(path.read_bytes())
+
+
+def build_release_bot(config_path: Path) -> tuple[Path, dict]:
+    config_path = config_path.resolve()
+    env = os.environ.copy()
+    env["SNAKEBOT_CONFIG_PATH"] = str(config_path)
+    subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--release",
+            "-q",
+            "-p",
+            "snakebot-bot",
+            "--bin",
+            "snakebot-bot",
+            "--bin",
+            "show_embedded_config",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        env=env,
+    )
+    info = json.loads(
+        subprocess.check_output(
+            [str(REPO_ROOT / "target/release/show_embedded_config")],
+            cwd=REPO_ROOT,
+            text=True,
+        )
+    )
+    expected_hash = config_hash(config_path)
+    if info["config_hash"] != expected_hash:
+        raise RuntimeError(
+            "embedded config hash mismatch: "
+            f"expected {expected_hash}, got {info['config_hash']}"
+        )
+    return REPO_ROOT / "target/release/snakebot-bot", info
 
 
 def load_seeds(path: Path, count: int) -> list[int]:
@@ -51,9 +96,10 @@ def run_java_smoke(
     seed_file: Path,
     boss_count: int,
     mirror_count: int,
+    candidate_config: Path = REPO_ROOT / "rust/bot/configs/submission_current.json",
 ) -> dict:
     classpath = ensure_java_oracle()
-    bot_path = build_release_bot()
+    bot_path, embedded = build_release_bot(candidate_config)
     strict_bot = f"env SNAKEBOT_STRICT_RECONCILE=1 {bot_path}"
     boss = "python3 config/Boss.py"
     seeds = load_seeds(seed_file, boss_count + mirror_count)
@@ -77,6 +123,10 @@ def run_java_smoke(
 
     return {
         "league": league,
+        "candidate_config": str(candidate_config),
+        "candidate_config_hash": config_hash(candidate_config),
+        "embedded_config_hash": embedded["config_hash"],
+        "embedded_config_name": embedded["name"],
         "matches": len(matches),
         "passed": not failed,
         "failures": failed,
@@ -117,6 +167,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--boss-count", type=int, default=4)
     parser.add_argument("--mirror-count", type=int, default=4)
+    parser.add_argument(
+        "--candidate-config",
+        type=Path,
+        default=REPO_ROOT / "rust/bot/configs/submission_current.json",
+    )
     return parser.parse_args()
 
 
@@ -127,6 +182,7 @@ def main() -> None:
         seed_file=args.seed_file,
         boss_count=args.boss_count,
         mirror_count=args.mirror_count,
+        candidate_config=args.candidate_config,
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
 

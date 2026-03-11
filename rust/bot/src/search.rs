@@ -14,6 +14,21 @@ pub enum SearchBudget {
     ExtraNodesAfterRoot(u64),
 }
 
+impl SearchBudget {
+    pub fn budget_type(self) -> &'static str {
+        match self {
+            SearchBudget::TimeMs(_) => "time_ms",
+            SearchBudget::ExtraNodesAfterRoot(_) => "extra_nodes_after_root",
+        }
+    }
+
+    pub fn budget_value(self) -> u64 {
+        match self {
+            SearchBudget::TimeMs(value) | SearchBudget::ExtraNodesAfterRoot(value) => value,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SearchStats {
     pub elapsed_ms: u64,
@@ -107,13 +122,7 @@ pub fn choose_action(
     };
     let mut root_analyses = Vec::with_capacity(my_actions.len());
     let mut root_values = vec![f32::NEG_INFINITY; my_actions.len()];
-    let mut best = RootAnalysis {
-        action: PlayerAction::default(),
-        action_id: 0,
-        worst_score: f64::NEG_INFINITY,
-        mean_score: f64::NEG_INFINITY,
-        responses: Vec::new(),
-    };
+    let mut best_shallow_worst = f64::NEG_INFINITY;
 
     'outer: for (my_index, _) in my_order {
         if expired(deadline) {
@@ -139,7 +148,7 @@ pub fn choose_action(
             evaluated += 1;
             responses.push(RootResponse { opp_index, score });
 
-            if allow_cutoff && worst_score < best.worst_score {
+            if allow_cutoff && worst_score < best_shallow_worst {
                 stats.cutoffs += 1;
                 break;
             }
@@ -150,20 +159,16 @@ pub fn choose_action(
         }
 
         mean_score /= evaluated as f64;
-        root_values[my_index] = worst_score as f32;
 
-        let analysis = RootAnalysis {
+        let mut analysis = RootAnalysis {
             action: my_action,
             action_id: my_index,
             worst_score,
             mean_score,
             responses,
         };
-        if analysis.worst_score > best.worst_score
-            || (analysis.worst_score == best.worst_score && analysis.mean_score > best.mean_score)
-        {
-            best = analysis.clone();
-        }
+        refresh_root_analysis(&mut analysis, &mut root_values);
+        best_shallow_worst = best_shallow_worst.max(analysis.worst_score);
         root_analyses.push(analysis);
     }
 
@@ -187,20 +192,21 @@ pub fn choose_action(
             .then_with(|| right.mean_score.total_cmp(&left.mean_score))
     });
 
-    for analysis in root_analyses
-        .iter()
-        .take(config.search.deepen_top_my.min(root_analyses.len()))
-    {
+    let deepen_top_my = config.search.deepen_top_my.min(root_analyses.len());
+    for analysis in root_analyses.iter_mut().take(deepen_top_my) {
         if expired(deadline) || extra_nodes_remaining == 0 {
             break;
         }
         stats.deepened_actions += 1;
 
-        let mut candidate_score = analysis.worst_score;
-        let mut sorted_responses = analysis.responses.clone();
-        sorted_responses.sort_by(|left, right| left.score.total_cmp(&right.score));
+        let mut response_indices = (0..analysis.responses.len()).collect::<Vec<_>>();
+        response_indices.sort_by(|left, right| {
+            analysis.responses[*left]
+                .score
+                .total_cmp(&analysis.responses[*right].score)
+        });
 
-        for response in sorted_responses
+        for response_index in response_indices
             .into_iter()
             .take(config.search.deepen_top_opp.min(analysis.responses.len()))
         {
@@ -211,7 +217,7 @@ pub fn choose_action(
                 state,
                 owner,
                 &analysis.action,
-                &opp_actions[response.opp_index],
+                &opp_actions[analysis.responses[response_index].opp_index],
             );
             let child_score = deepen_branch(
                 &next,
@@ -221,21 +227,20 @@ pub fn choose_action(
                 &mut extra_nodes_remaining,
                 &mut stats,
             );
-            candidate_score = candidate_score.min(child_score);
+            analysis.responses[response_index].score = child_score;
         }
-
-        if candidate_score > best.worst_score
-            || (candidate_score == best.worst_score && analysis.mean_score > best.mean_score)
-        {
-            best = RootAnalysis {
-                action: analysis.action.clone(),
-                action_id: analysis.action_id,
-                worst_score: candidate_score,
-                mean_score: analysis.mean_score,
-                responses: analysis.responses.clone(),
-            };
-        }
+        refresh_root_analysis(analysis, &mut root_values);
     }
+
+    let best = root_analyses
+        .iter()
+        .max_by(|left, right| {
+            left.worst_score
+                .total_cmp(&right.worst_score)
+                .then_with(|| left.mean_score.total_cmp(&right.mean_score))
+        })
+        .expect("non-empty root analyses")
+        .clone();
 
     stats.elapsed_ms = started.elapsed().as_millis() as u64;
     SearchOutcome {
@@ -294,7 +299,7 @@ fn deepen_branch(
         .collect::<Vec<_>>();
     opp_order.sort_by(|left, right| left.1.total_cmp(&right.1));
 
-    let mut worst = f64::INFINITY;
+    let mut best_followup = f64::NEG_INFINITY;
     for (my_index, _) in my_order
         .into_iter()
         .take(config.search.deepen_child_my.min(my_actions.len()))
@@ -302,7 +307,7 @@ fn deepen_branch(
         if expired(deadline) || *extra_nodes_remaining == 0 {
             break;
         }
-        let mut child_best = f64::INFINITY;
+        let mut child_worst = f64::INFINITY;
         for (opp_index, _) in opp_order
             .iter()
             .copied()
@@ -315,16 +320,40 @@ fn deepen_branch(
             stats.extra_nodes += 1;
             let next = simulate_state(state, owner, &my_actions[my_index], &opp_actions[opp_index]);
             let score = evaluate(&next, owner, CONTEST_MAX_TURNS, &config.eval);
-            child_best = child_best.min(score);
+            child_worst = child_worst.min(score);
         }
-        worst = worst.min(child_best);
+        if child_worst.is_finite() {
+            best_followup = best_followup.max(child_worst);
+        }
     }
 
-    if worst.is_finite() {
-        worst
+    if best_followup.is_finite() {
+        best_followup
     } else {
         evaluate(state, owner, CONTEST_MAX_TURNS, &config.eval)
     }
+}
+
+fn refresh_root_analysis(analysis: &mut RootAnalysis, root_values: &mut [f32]) {
+    if analysis.responses.is_empty() {
+        analysis.worst_score = f64::NEG_INFINITY;
+        analysis.mean_score = f64::NEG_INFINITY;
+        root_values[analysis.action_id] = f32::NEG_INFINITY;
+        return;
+    }
+
+    analysis.worst_score = analysis
+        .responses
+        .iter()
+        .map(|response| response.score)
+        .fold(f64::INFINITY, f64::min);
+    analysis.mean_score = analysis
+        .responses
+        .iter()
+        .map(|response| response.score)
+        .sum::<f64>()
+        / analysis.responses.len() as f64;
+    root_values[analysis.action_id] = analysis.worst_score as f32;
 }
 
 fn action_prior(
@@ -481,12 +510,13 @@ fn direction_to_word(direction: Direction) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use snakebot_engine::{Coord, Direction, GameState, Grid, TileType};
+    use snakebot_engine::{initial_state_from_seed, Coord, Direction, GameState, Grid, PlayerAction, TileType};
 
     use crate::config::BotConfig;
 
     use super::{
-        choose_action, choose_action_unlimited, live_budget_for_turn, render_action, SearchBudget,
+        choose_action, choose_action_unlimited, deepen_branch, live_budget_for_turn,
+        refresh_root_analysis, render_action, simulate_state, SearchBudget,
     };
 
     #[test]
@@ -558,6 +588,149 @@ mod tests {
     }
 
     #[test]
+    fn deepen_branch_uses_maximin_backup() {
+        let mut grid = Grid::new(6, 6);
+        for x in 0..6 {
+            grid.set(Coord::new(x, 5), TileType::Wall);
+        }
+        grid.set(Coord::new(0, 2), TileType::Wall);
+        grid.set(Coord::new(4, 2), TileType::Wall);
+        grid.apples.push(Coord::new(1, 1));
+        let mut state = GameState::new(grid);
+        state.add_bird(
+            0,
+            0,
+            vec![Coord::new(1, 2), Coord::new(1, 3), Coord::new(1, 4)],
+            Some(Direction::North),
+        );
+        state.add_bird(
+            1,
+            1,
+            vec![Coord::new(3, 2), Coord::new(3, 3), Coord::new(3, 4)],
+            Some(Direction::North),
+        );
+
+        let mut config = BotConfig::default();
+        config.search.deepen_child_my = 3;
+        config.search.deepen_child_opp = 3;
+        let my_actions = super::ordered_joint_actions(&state, 0);
+        let opp_actions = super::ordered_joint_actions(&state, 1);
+        let expected = my_actions
+            .iter()
+            .map(|my_action| {
+                opp_actions
+                    .iter()
+                    .map(|opp_action| {
+                        let next = simulate_state(&state, 0, my_action, opp_action);
+                        crate::eval::evaluate(&next, 0, 200, &config.eval)
+                    })
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        let mut remaining = 128;
+        let mut stats = super::SearchStats::default();
+        let actual = deepen_branch(&state, 0, &config, None, &mut remaining, &mut stats);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn refresh_root_analysis_updates_mean_and_root_value() {
+        let mut analysis = super::RootAnalysis {
+            action: PlayerAction::default(),
+            action_id: 1,
+            worst_score: 0.0,
+            mean_score: 0.0,
+            responses: vec![
+                super::RootResponse {
+                    opp_index: 0,
+                    score: 2.0,
+                },
+                super::RootResponse {
+                    opp_index: 1,
+                    score: -1.0,
+                },
+                super::RootResponse {
+                    opp_index: 2,
+                    score: 5.0,
+                },
+            ],
+        };
+        let mut root_values = vec![f32::NEG_INFINITY; 3];
+        refresh_root_analysis(&mut analysis, &mut root_values);
+        assert_eq!(analysis.worst_score, -1.0);
+        assert!((analysis.mean_score - 2.0).abs() < f64::EPSILON);
+        assert_eq!(root_values[1], -1.0);
+    }
+
+    #[test]
+    fn reranking_uses_refined_root_scores() {
+        let mut root_values = vec![f32::NEG_INFINITY; 2];
+        let mut analyses = vec![
+            super::RootAnalysis {
+                action: PlayerAction::default(),
+                action_id: 0,
+                worst_score: 0.0,
+                mean_score: 0.0,
+                responses: vec![
+                    super::RootResponse {
+                        opp_index: 0,
+                        score: 1.0,
+                    },
+                    super::RootResponse {
+                        opp_index: 1,
+                        score: 2.0,
+                    },
+                ],
+            },
+            super::RootAnalysis {
+                action: PlayerAction::default(),
+                action_id: 1,
+                worst_score: 0.0,
+                mean_score: 0.0,
+                responses: vec![
+                    super::RootResponse {
+                        opp_index: 0,
+                        score: 0.8,
+                    },
+                    super::RootResponse {
+                        opp_index: 1,
+                        score: 0.9,
+                    },
+                ],
+            },
+        ];
+        for analysis in &mut analyses {
+            refresh_root_analysis(analysis, &mut root_values);
+        }
+        assert_eq!(
+            analyses
+                .iter()
+                .max_by(|left, right| {
+                    left.worst_score
+                        .total_cmp(&right.worst_score)
+                        .then_with(|| left.mean_score.total_cmp(&right.mean_score))
+                })
+                .expect("best root action")
+                .action_id,
+            0
+        );
+
+        analyses[0].responses[0].score = -2.0;
+        refresh_root_analysis(&mut analyses[0], &mut root_values);
+        let best = analyses
+            .iter()
+            .max_by(|left, right| {
+                left.worst_score
+                    .total_cmp(&right.worst_score)
+                    .then_with(|| left.mean_score.total_cmp(&right.mean_score))
+            })
+            .expect("best root action after refinement");
+        assert_eq!(best.action_id, 1);
+        assert_eq!(root_values[0], -2.0);
+    }
+
+    #[test]
     fn unlimited_search_matches_interface() {
         let mut grid = Grid::new(5, 5);
         for x in 0..5 {
@@ -579,5 +752,56 @@ mod tests {
         let command =
             render_action(&choose_action_unlimited(&state, 0, &BotConfig::default()).action);
         assert!(!command.is_empty());
+    }
+
+    #[test]
+    fn chosen_action_root_value_matches_reported_score() {
+        let mut grid = Grid::new(5, 5);
+        for x in 0..5 {
+            grid.set(Coord::new(x, 4), TileType::Wall);
+        }
+        let mut state = GameState::new(grid);
+        state.add_bird(
+            0,
+            0,
+            vec![Coord::new(1, 2), Coord::new(1, 3), Coord::new(1, 4)],
+            Some(Direction::North),
+        );
+        state.add_bird(
+            1,
+            1,
+            vec![Coord::new(3, 2), Coord::new(3, 3), Coord::new(3, 4)],
+            Some(Direction::North),
+        );
+        let outcome = choose_action(
+            &state,
+            0,
+            &BotConfig::default(),
+            SearchBudget::ExtraNodesAfterRoot(64),
+        );
+        assert_eq!(outcome.root_values[outcome.action_id], outcome.score as f32);
+    }
+
+    #[test]
+    fn deepening_can_change_the_real_root_choice() {
+        let deep_config = BotConfig::default();
+        let mut shallow_config = deep_config.clone();
+        shallow_config.search.deepen_top_my = 0;
+        shallow_config.search.deepen_top_opp = 0;
+        shallow_config.search.deepen_child_my = 0;
+        shallow_config.search.deepen_child_opp = 0;
+        shallow_config.search.extra_nodes_after_root = 0;
+
+        for seed in 1..=64 {
+            let state = initial_state_from_seed(seed, 4);
+            let shallow = choose_action(&state, 0, &shallow_config, SearchBudget::ExtraNodesAfterRoot(0));
+            let deep = choose_action(&state, 0, &deep_config, SearchBudget::ExtraNodesAfterRoot(256));
+            if shallow.action_id != deep.action_id {
+                assert_eq!(deep.root_values[deep.action_id], deep.score as f32);
+                return;
+            }
+        }
+
+        panic!("failed to find a seed where deepening changes the root choice");
     }
 }

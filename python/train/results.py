@@ -55,12 +55,21 @@ def ensure_schema(path: str | Path) -> None:
                 status TEXT NOT NULL,
                 description TEXT NOT NULL,
                 composite_score REAL NOT NULL,
+                acceptance_version INTEGER NOT NULL DEFAULT 1,
                 metrics_json TEXT NOT NULL,
                 failures_json TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(experiments)").fetchall()
+        }
+        if "acceptance_version" not in columns:
+            conn.execute(
+                "ALTER TABLE experiments ADD COLUMN acceptance_version INTEGER NOT NULL DEFAULT 1"
+            )
 
 
 def append_result(
@@ -71,19 +80,29 @@ def append_result(
     description: str,
     metrics: dict[str, Any],
     failures: list[str],
+    acceptance_version: int = 1,
 ) -> None:
     ensure_schema(path)
     with sqlite3.connect(path) as conn:
         conn.execute(
             """
-            INSERT INTO experiments (name, status, description, composite_score, metrics_json, failures_json)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO experiments (
+                name,
+                status,
+                description,
+                composite_score,
+                acceptance_version,
+                metrics_json,
+                failures_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
                 status,
                 description,
                 compute_composite(metrics),
+                acceptance_version,
                 json.dumps(metrics, sort_keys=True),
                 json.dumps(failures, sort_keys=True),
             ),

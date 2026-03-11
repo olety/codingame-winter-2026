@@ -12,7 +12,8 @@ Main pieces:
 
 Key behavior:
 
-- Java map dumps are still available, but the hot loop can use Rust-generated states.
+- Rust-generated seeds are now the default hot path.
+- Java map dumps are still available, but only as an explicit oracle/debug mode.
 - Offline export now defaults to `extra_nodes_after_root` instead of wall-clock search.
 - Release binaries are used for self-play/export instead of debug builds.
 
@@ -34,6 +35,7 @@ Important fields:
 - chosen joint-action id
 - joint-action count
 - aligned root value vector
+- budget type and budget value
 - search stats
 
 This is meant to support:
@@ -58,6 +60,7 @@ This is a guard against the earlier leakage issue where validation rows duplicat
 
 - training-only runs are `informational`
 - arena plus Java smoke is the acceptance gate
+- acceptance semantics are now versioned so older pre-arena rows can be distinguished from current promotion runs
 
 Wrapper scripts:
 

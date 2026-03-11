@@ -22,6 +22,8 @@ This directory is the local, W&B-free training side of the Rust search/value pip
   "chosen_action_id": 3,
   "joint_action_count": 27,
   "root_values": [0.4, 0.1, -0.2],
+  "budget_type": "extra_nodes_after_root",
+  "budget_value": 64,
   "search_stats": {"elapsed_ms": 12, "root_pairs": 729, "extra_nodes": 64, "cutoffs": 8}
 }
 ```
@@ -39,7 +41,7 @@ This directory is the local, W&B-free training side of the Rust search/value pip
 - `python -m python.train.run_arena`
 - `python -m python.train.java_smoke`
 
-## Java oracle map dumps
+## Optional Java oracle map dumps
 
 Generate exact initial states from the Java referee:
 
@@ -63,16 +65,18 @@ Rust can load these dump records through `snakebot_engine::load_dump_records`.
 
 ## Rust self-play export
 
-Export training samples from Java-generated initial states:
+Export training samples directly from Rust-generated seeds:
 
 ```bash
 cargo run --release -q -p snakebot-bot --bin selfplay_export -- \
-  --maps python/train/artifacts/maps_l4.jsonl \
+  --seed-start 1 \
+  --seed-count 200 \
+  --league 4 \
   --out python/train/data/selfplay.jsonl \
   --limit 200 \
   --max-turns 120 \
   --extra-nodes-after-root 5000 \
-  --config rust/bot/configs/default_search_v2.json \
+  --config rust/bot/configs/submission_current.json \
   --git-sha "$(git rev-parse HEAD)"
 ```
 
@@ -80,6 +84,7 @@ Notes:
 
 - Offline export is deterministic by default: it always finishes the root pass, then spends the requested extra node budget on deepening.
 - `--search-ms` is still available as an explicit override for debugging, but it is no longer the default.
+- `--maps` remains available as an explicit oracle/debug input mode, but it is no longer the default hot path.
 - The exporter writes owner-relative samples for both players on each turn.
 - The current tensor shape is `8 x 23 x 42` with `6` scalar features.
 
@@ -99,8 +104,9 @@ python -m python.train.parallel_selfplay \
 
 Notes:
 
-- The script builds release binaries, builds the Java oracle once, then shards self-play across `--workers`.
-- Shards are written under `python/train/data/<dataset>_shards/` and merged into the final dataset path.
+- The script builds release binaries and shards Rust-seed self-play across `--workers`.
+- Java build/dump work only happens if you explicitly pass `--maps-path`.
+- Shards are written under `python/train/data/<dataset>_shards/`. Merging into a single file is optional via `--merge-output`.
 - Training stays mostly single-run on `mps`; parallelism is intended for map dumping and self-play export.
 
 ## Arena and live-path smoke
@@ -109,20 +115,24 @@ Run heldout Rust-vs-Rust arena matches:
 
 ```bash
 python -m python.train.run_arena \
-  --candidate-config rust/bot/configs/default_search_v2.json \
-  --incumbent-config rust/bot/configs/anchor_search_v1.json \
-  --anchor-config rust/bot/configs/anchor_search_v1.json
+  --candidate-config rust/bot/configs/submission_current.json \
+  --incumbent-config rust/bot/configs/incumbent_current.json \
+  --anchor-config rust/bot/configs/anchor_root_only.json
 ```
 
 Run the Java referee smoke canary directly:
 
 ```bash
-python -m python.train.java_smoke --boss-count 4 --mirror-count 4
+python -m python.train.java_smoke \
+  --boss-count 4 \
+  --mirror-count 4 \
+  --candidate-config rust/bot/configs/submission_current.json
 ```
 
 Notes:
 
 - Arena is the strength authority. Java smoke is the real I/O canary.
+- Java smoke now verifies that the built bot artifact embeds the same candidate config hash that arena evaluated.
 - Both scripts use release-mode Rust binaries.
 
 ## Notes

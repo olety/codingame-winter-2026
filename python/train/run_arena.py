@@ -4,13 +4,15 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
-from python.train.java_smoke import run_java_smoke
+from python.train.java_smoke import config_hash, run_java_smoke
 from python.train.results import append_result, check_gates, compute_composite
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+ACCEPTANCE_VERSION = 2
 
 
 def parse_args() -> argparse.Namespace:
@@ -18,17 +20,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--candidate-config",
         type=Path,
-        default=REPO_ROOT / "rust/bot/configs/default_search_v2.json",
+        required=True,
     )
     parser.add_argument(
         "--incumbent-config",
         type=Path,
-        default=REPO_ROOT / "rust/bot/configs/anchor_search_v1.json",
+        default=REPO_ROOT / "rust/bot/configs/incumbent_current.json",
     )
     parser.add_argument(
         "--anchor-config",
         type=Path,
-        default=REPO_ROOT / "rust/bot/configs/anchor_search_v1.json",
+        default=REPO_ROOT / "rust/bot/configs/anchor_root_only.json",
     )
     parser.add_argument(
         "--heldout-suite",
@@ -86,6 +88,17 @@ def run_arena_binary(
 
 def main() -> None:
     args = parse_args()
+    candidate_hash = config_hash(args.candidate_config)
+    incumbent_hash = config_hash(args.incumbent_config)
+    anchor_hash = config_hash(args.anchor_config)
+    if candidate_hash == anchor_hash:
+        raise ValueError("candidate config must differ from anchor config")
+    if candidate_hash == incumbent_hash:
+        print(
+            "warning: candidate config matches incumbent config hash",
+            file=sys.stderr,
+        )
+
     arena_bin = build_release_arena()
     heldout = run_arena_binary(
         arena_bin,
@@ -108,10 +121,19 @@ def main() -> None:
         seed_file=REPO_ROOT / "config/arena/smoke_v1.txt",
         boss_count=4,
         mirror_count=4,
+        candidate_config=args.candidate_config,
     )
 
     heldout_win_margin = (heldout["wins"] - heldout["losses"]) / max(heldout["matches"], 1)
     metrics = {
+        "acceptance_version": ACCEPTANCE_VERSION,
+        "candidate_config_hash": candidate_hash,
+        "incumbent_config_hash": incumbent_hash,
+        "anchor_config_hash": anchor_hash,
+        "heldout_suite": str(args.heldout_suite),
+        "heldout_suite_name": heldout["suite_name"],
+        "shadow_suite": str(args.shadow_suite),
+        "shadow_suite_name": shadow["suite_name"],
         "heldout_body_diff": heldout["average_body_diff"],
         "heldout_win_margin": heldout_win_margin,
         "shadow_body_diff": shadow["average_body_diff"],
@@ -136,6 +158,7 @@ def main() -> None:
         description="arena + java smoke evaluation",
         metrics=metrics,
         failures=gate_result.failures,
+        acceptance_version=ACCEPTANCE_VERSION,
     )
     payload = {
         "status": status,

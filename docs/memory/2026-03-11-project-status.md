@@ -7,14 +7,15 @@ Date: 2026-03-11
 The repository now has:
 
 - a Java-parity Rust simulator
-- a stronger Rust search bot with explicit contest terminal semantics
+- a stronger Rust search bot with corrected depth-2 refinement and embedded submission config
 - a release-mode Rust arena harness with frozen seed suites
-- a real Java-referee smoke canary for live I/O/reconciliation checks
-- a deterministic self-play/export path and a grouped Python value-training pipeline
+- a real Java-referee smoke canary for live I/O/reconciliation checks on the exact built candidate artifact
+- a deterministic self-play/export path with Rust-generated seeds by default and a grouped Python value-training pipeline
 
 The newest local commit after the original simulator/bot work is:
 
 - `43d7d1c` `Add arena evaluation and deterministic search upgrades`
+- plus the current uncommitted follow-up for search-fix/config-discipline cleanup
 
 The most important current checks that passed are:
 
@@ -57,9 +58,10 @@ Detailed follow-up docs:
 ## What Changed Most Recently
 
 - Engine semantics are split cleanly: natural Java-parity `is_game_over()` stays separate from contest `is_terminal(200)` and `final_result(200)`.
-- Live search now uses turn-aware budgets, while offline export uses deterministic post-root node budgets.
-- The arena and Java smoke harnesses are now the main evaluation path, with training-only runs marked informational.
-- Self-play rows now include stable hashes, search stats, and compact root action/value targets.
+- Live search now uses an embedded submission config, while arena/self-play/training operate on explicit candidate/incumbent/anchor JSONs.
+- Depth-2 refinement now recomputes refined root worst/mean scores and exported root values instead of only downgrading branches.
+- Java smoke now rebuilds the candidate artifact, verifies the embedded config hash, and then runs the referee canary on that exact build.
+- Self-play now defaults to Rust-generated seeds, records explicit budget type/value, and can train directly from shard directories without mandatory merging.
 
 ## Recommended Next Read
 

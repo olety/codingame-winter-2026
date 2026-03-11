@@ -32,6 +32,10 @@ The Rust search path now has:
 - heuristic ordering for friendly actions and opponent replies
 - incumbent-based early cutoff inside the opponent loop
 - depth-2 top-k follow-up search after the root pass
+- corrected deepening backup: second ply now uses `max_my min_opp`
+- refined root reranking: deepened reply values recompute each root action's worst score, mean score, and exported root value before the final root selection
+
+The live bot no longer relies on an in-code default config for submission behavior. It now embeds a build-time config artifact, with `submission_current.json` as the default source and an override path for local candidate promotion runs.
 
 The current implementation intentionally does **not** include a transposition table yet. The current order of work is:
 
@@ -51,7 +55,7 @@ It:
 - runs two configs against each other in-process
 - swaps seats automatically
 - parallelizes across seeds
-- reports average body diff, W/D/L, tiebreak win rate, average turns, node counts, and move-time percentiles
+- reports average body diff, W/D/L, tiebreak win rate, average turns, node counts, move-time percentiles, and both config hashes
 
 Frozen committed suites:
 
@@ -71,6 +75,8 @@ The canary runs the real compiled Rust bot through the actual referee runner and
 ```bash
 SNAKEBOT_STRICT_RECONCILE=1
 ```
+
+It now also verifies that the built bot artifact embeds the same candidate config hash that the arena evaluation used.
 
 ## Recent runtime checks
 

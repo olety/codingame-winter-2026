@@ -34,6 +34,8 @@ pub struct TrainingRow {
     pub chosen_action_id: usize,
     pub joint_action_count: usize,
     pub root_values: Vec<f32>,
+    pub budget_type: String,
+    pub budget_value: u64,
     pub search_stats: SearchStats,
 }
 
@@ -48,6 +50,8 @@ pub struct TrainingMetadata {
     pub chosen_action_id: usize,
     pub joint_action_count: usize,
     pub root_values: Vec<f32>,
+    pub budget_type: String,
+    pub budget_value: u64,
     pub search_stats: SearchStats,
 }
 
@@ -131,6 +135,8 @@ pub fn encode_training_row(
         chosen_action_id: metadata.chosen_action_id,
         joint_action_count: metadata.joint_action_count,
         root_values: metadata.root_values,
+        budget_type: metadata.budget_type,
+        budget_value: metadata.budget_value,
         search_stats: metadata.search_stats,
     }
 }
