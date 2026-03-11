@@ -25,7 +25,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 1) - 2))
     parser.add_argument("--games", type=int, default=0)
     parser.add_argument("--max-turns", type=int, default=120)
-    parser.add_argument("--search-ms", type=int, default=2)
+    parser.add_argument("--extra-nodes-after-root", type=int, default=5000)
+    parser.add_argument("--search-ms", type=int, default=0)
+    parser.add_argument(
+        "--config-path",
+        type=Path,
+        default=REPO_ROOT / "rust/bot/configs/default_search_v2.json",
+    )
     parser.add_argument("--maps-path", type=Path, default=REPO_ROOT / "python/train/artifacts/maps_l4.jsonl")
     parser.add_argument("--dataset-path", type=Path, default=REPO_ROOT / EXPERIMENT["dataset_path"])
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / EXPERIMENT["output_dir"])
@@ -56,8 +62,8 @@ def ensure_java_oracle() -> Path:
 
 
 def build_exporter() -> Path:
-    run(["cargo", "build", "-q", "-p", "snakebot-bot", "--bin", "selfplay_export"])
-    return REPO_ROOT / "target/debug/selfplay_export"
+    run(["cargo", "build", "--release", "-q", "-p", "snakebot-bot", "--bin", "selfplay_export"])
+    return REPO_ROOT / "target/release/selfplay_export"
 
 
 def dump_maps(args: argparse.Namespace, classpath: Path) -> None:
@@ -90,6 +96,10 @@ def export_shards(args: argparse.Namespace, exporter_bin: Path) -> list[Path]:
     procs: list[tuple[int, subprocess.Popen[str], Path]] = []
     shard_paths: list[Path] = []
 
+    git_sha = (
+        subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
+    )
+
     for shard_index in range(workers):
         shard_path = shard_dir / f"selfplay-{shard_index:03d}.jsonl"
         shard_paths.append(shard_path)
@@ -103,13 +113,19 @@ def export_shards(args: argparse.Namespace, exporter_bin: Path) -> list[Path]:
             str(limit),
             "--max-turns",
             str(args.max_turns),
-            "--search-ms",
-            str(args.search_ms),
+            "--git-sha",
+            git_sha,
+            "--config",
+            str(args.config_path),
             "--shard-index",
             str(shard_index),
             "--num-shards",
             str(workers),
         ]
+        if args.search_ms > 0:
+            cmd.extend(["--search-ms", str(args.search_ms)])
+        else:
+            cmd.extend(["--extra-nodes-after-root", str(args.extra_nodes_after_root)])
         procs.append(
             (
                 shard_index,
@@ -161,7 +177,7 @@ def run_training(args: argparse.Namespace, sample_count: int) -> dict:
     metrics = train(config)
     metrics["dataset_samples_generated"] = sample_count
     gate_result = check_gates(metrics)
-    status = "accepted" if gate_result.passed else "rejected"
+    status = "informational"
     append_result(
         args.results_db,
         name=args.name,

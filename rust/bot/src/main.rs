@@ -1,8 +1,9 @@
 use std::io::{self, BufRead, BufReader, Write};
 
-use snakebot_engine::{GameState, PlayerAction};
+use snakebot_bot::config::BotConfig;
 use snakebot_bot::input::{BotIo, FrameObservation};
-use snakebot_bot::search::{choose_action, render_action, safe_deadline};
+use snakebot_bot::search::{choose_action, live_budget_for_turn, render_action};
+use snakebot_engine::{GameState, PlayerAction};
 
 fn main() -> io::Result<()> {
     let stdin = io::stdin();
@@ -14,6 +15,7 @@ fn main() -> io::Result<()> {
 }
 
 struct Bot {
+    config: BotConfig,
     io: BotIo,
     state: Option<GameState>,
     last_my_action: PlayerAction,
@@ -22,6 +24,7 @@ struct Bot {
 impl Bot {
     fn new(io: BotIo) -> Self {
         Self {
+            config: BotConfig::default(),
             io,
             state: None,
             last_my_action: PlayerAction::default(),
@@ -29,9 +32,21 @@ impl Bot {
     }
 
     fn run(mut self, reader: &mut impl BufRead, writer: &mut impl Write) -> io::Result<()> {
+        let debug_stats = std::env::var_os("SNAKEBOT_DEBUG_STATS").is_some();
         while let Some(frame) = self.io.read_frame(reader)? {
             let state = self.reconcile_state(&frame);
-            let outcome = choose_action(&state, self.io.player_index, safe_deadline());
+            let budget = live_budget_for_turn(&self.config, state.turn);
+            let outcome = choose_action(&state, self.io.player_index, &self.config, budget);
+            if debug_stats {
+                eprintln!(
+                    "turn={} elapsed_ms={} root_pairs={} extra_nodes={} cutoffs={}",
+                    state.turn,
+                    outcome.stats.elapsed_ms,
+                    outcome.stats.root_pairs,
+                    outcome.stats.extra_nodes,
+                    outcome.stats.cutoffs
+                );
+            }
             let command = render_action(&outcome.action);
             writeln!(writer, "{command}")?;
             writer.flush()?;
@@ -65,6 +80,10 @@ impl Bot {
             if self.io.visible_signature(&simulated) == observed_signature {
                 return simulated;
             }
+        }
+
+        if std::env::var_os("SNAKEBOT_STRICT_RECONCILE").is_some() {
+            panic!("reconcile_state fell back to visible reconstruction");
         }
 
         fallback

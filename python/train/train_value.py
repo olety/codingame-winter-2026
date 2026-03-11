@@ -5,11 +5,12 @@ import json
 import math
 import random
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 
 from python.train.dataset import SelfPlayDataset
 from python.train.experiment import EXPERIMENT
@@ -62,17 +63,68 @@ def pearson(preds: list[float], targets: list[float]) -> float:
     return num / denom
 
 
+def dedup_rows(rows: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        key = str(row.get("encoded_view_hash", f"row-{len(deduped)}"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
+def grouped_split_indices(rows: list[dict], train_split: float, seed: int) -> tuple[list[int], list[int]]:
+    grouped: dict[tuple[int, str], list[int]] = defaultdict(list)
+    for index, row in enumerate(rows):
+        grouped[(int(row.get("seed", 0)), str(row.get("game_id", "game-0")))].append(index)
+
+    groups = list(grouped.items())
+    rng = random.Random(seed)
+    rng.shuffle(groups)
+
+    target_train = max(1, int(len(rows) * train_split))
+    train_indices: list[int] = []
+    valid_indices: list[int] = []
+
+    for _, indices in groups:
+        bucket = train_indices if len(train_indices) < target_train else valid_indices
+        bucket.extend(indices)
+
+    if not valid_indices and train_indices:
+        valid_indices.append(train_indices.pop())
+    if not train_indices and valid_indices:
+        train_indices.append(valid_indices.pop())
+
+    return train_indices, valid_indices
+
+
+def zero_baseline_mae(loader: DataLoader, device: torch.device) -> float:
+    total = 0.0
+    count = 0
+    with torch.no_grad():
+        for batch in loader:
+            target = batch["value"].to(device)
+            total += torch.abs(target).mean().item()
+            count += 1
+    return total / max(count, 1)
+
+
 def train(config: dict, metrics_path: Path | None = None) -> dict:
     set_seed(int(config["seed"]))
     device = select_device(str(config["device_preference"]))
     started = time.time()
 
     dataset = SelfPlayDataset(config["dataset_path"], max_samples=int(config["max_samples"]))
-    train_len = max(1, int(len(dataset) * float(config["train_split"])))
-    valid_len = max(1, len(dataset) - train_len)
-    if train_len + valid_len > len(dataset):
-        train_len -= 1
-    train_set, valid_set = random_split(dataset, [train_len, len(dataset) - train_len])
+    dataset.rows = dedup_rows(dataset.rows)
+    train_indices, valid_indices = grouped_split_indices(
+        dataset.rows,
+        float(config["train_split"]),
+        int(config["seed"]),
+    )
+    train_set = Subset(dataset, train_indices)
+    valid_set = Subset(dataset, valid_indices)
 
     train_loader = DataLoader(train_set, batch_size=int(config["batch_size"]), shuffle=True)
     valid_loader = DataLoader(valid_set, batch_size=int(config["batch_size"]), shuffle=False)
@@ -106,11 +158,16 @@ def train(config: dict, metrics_path: Path | None = None) -> dict:
             train_loss = loss.item()
 
     validation_mae, validation_correlation = evaluate(model, valid_loader, device)
+    baseline_mae = zero_baseline_mae(valid_loader, device)
     metrics = {
         "device": str(device),
-        "samples": len(dataset),
+        "samples": len(dataset.rows),
+        "train_samples": len(train_indices),
+        "valid_samples": len(valid_indices),
+        "unique_games": len({(row.get("seed", 0), row.get("game_id", "game-0")) for row in dataset.rows}),
         "train_loss": train_loss,
         "validation_mae": validation_mae,
+        "validation_zero_baseline_mae": baseline_mae,
         "validation_correlation": validation_correlation,
         "validation_score": 1.0 / (1.0 + validation_mae),
         "training_wallclock_minutes": (time.time() - started) / 60.0,

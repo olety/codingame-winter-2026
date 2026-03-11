@@ -1,3 +1,4 @@
+pub mod config;
 pub mod eval;
 pub mod features;
 pub mod input;

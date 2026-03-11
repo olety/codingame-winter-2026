@@ -1,18 +1,12 @@
 use snakebot_engine::{Coord, GameState};
 
-const BODY_WEIGHT: f64 = 120.0;
-const LOSS_WEIGHT: f64 = 18.0;
-const MOBILITY_WEIGHT: f64 = 7.5;
-const APPLE_WEIGHT: f64 = 16.0;
-const STABILITY_WEIGHT: f64 = 10.0;
-const BREAKPOINT_WEIGHT: f64 = 9.0;
-const FRAGILE_ATTACK_WEIGHT: f64 = 8.0;
-const TERMINAL_WEIGHT: f64 = 10_000.0;
+use crate::config::EvalWeights;
 
-pub fn evaluate(state: &GameState, owner: usize) -> f64 {
-    if state.is_game_over() {
-        let final_scores = state.final_scores();
-        return TERMINAL_WEIGHT * f64::from(final_scores[owner] - final_scores[1 - owner]);
+pub fn evaluate(state: &GameState, owner: usize, max_turns: i32, weights: &EvalWeights) -> f64 {
+    if state.is_terminal(max_turns) {
+        let final_result = state.final_result(max_turns);
+        return weights.terminal * f64::from(final_result.body_diff_for(owner))
+            + f64::from(final_result.loss_diff_for(owner));
     }
 
     let body_scores = state.body_scores();
@@ -24,13 +18,13 @@ pub fn evaluate(state: &GameState, owner: usize) -> f64 {
     let breakpoint = breakpoint_score(state, owner);
     let pressure = fragile_attack_score(state, owner);
 
-    BODY_WEIGHT * body_diff
-        + LOSS_WEIGHT * loss_diff
-        + MOBILITY_WEIGHT * mobility
-        + APPLE_WEIGHT * apple_race
-        + STABILITY_WEIGHT * stability
-        + BREAKPOINT_WEIGHT * breakpoint
-        + FRAGILE_ATTACK_WEIGHT * pressure
+    weights.body * body_diff
+        + weights.loss * loss_diff
+        + weights.mobility * mobility
+        + weights.apple * apple_race
+        + weights.stability * stability
+        + weights.breakpoint * breakpoint
+        + weights.fragile_attack * pressure
 }
 
 fn mobility_score(state: &GameState, owner: usize) -> f64 {

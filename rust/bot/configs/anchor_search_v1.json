@@ -1,0 +1,22 @@
+{
+  "name": "anchor_search_v1",
+  "eval": {
+    "body": 120.0,
+    "loss": 18.0,
+    "mobility": 7.5,
+    "apple": 16.0,
+    "stability": 10.0,
+    "breakpoint": 9.0,
+    "fragile_attack": 8.0,
+    "terminal": 10000.0
+  },
+  "search": {
+    "first_turn_ms": 850,
+    "later_turn_ms": 40,
+    "deepen_top_my": 6,
+    "deepen_top_opp": 6,
+    "deepen_child_my": 4,
+    "deepen_child_opp": 4,
+    "extra_nodes_after_root": 5000
+  }
+}

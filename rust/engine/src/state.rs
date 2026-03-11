@@ -68,6 +68,43 @@ pub struct StepResult {
     pub final_scores: [i32; 2],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum TerminalReason {
+    ApplesExhausted,
+    PlayerEliminated(usize),
+    TurnLimitReached,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FinalResult {
+    pub terminal: bool,
+    pub reason: Option<TerminalReason>,
+    pub body_scores: [i32; 2],
+    pub final_scores: [i32; 2],
+    pub losses: [i32; 2],
+    pub body_diff: i32,
+    pub loss_diff: i32,
+    pub winner: Option<usize>,
+}
+
+impl FinalResult {
+    pub fn body_diff_for(&self, owner: usize) -> i32 {
+        if owner == 0 {
+            self.body_diff
+        } else {
+            -self.body_diff
+        }
+    }
+
+    pub fn loss_diff_for(&self, owner: usize) -> i32 {
+        if owner == 0 {
+            self.loss_diff
+        } else {
+            -self.loss_diff
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct VisibilityState {
     pub player_index: usize,
@@ -464,6 +501,54 @@ impl GameState {
         self.grid.apples.is_empty()
             || (0..=1).any(|owner| self.birds_for_player(owner).all(|bird| !bird.alive))
     }
+
+    pub fn terminal_reason(&self, max_turns: i32) -> Option<TerminalReason> {
+        if self.grid.apples.is_empty() {
+            return Some(TerminalReason::ApplesExhausted);
+        }
+        if let Some(owner) =
+            (0..=1).find(|owner| self.birds_for_player(*owner).all(|bird| !bird.alive))
+        {
+            return Some(TerminalReason::PlayerEliminated(owner));
+        }
+        if self.turn >= max_turns {
+            return Some(TerminalReason::TurnLimitReached);
+        }
+        None
+    }
+
+    pub fn is_terminal(&self, max_turns: i32) -> bool {
+        self.terminal_reason(max_turns).is_some()
+    }
+
+    pub fn final_result(&self, max_turns: i32) -> FinalResult {
+        let body_scores = self.body_scores();
+        let final_scores = self.final_scores();
+        let body_diff = body_scores[0] - body_scores[1];
+        let loss_diff = self.losses[1] - self.losses[0];
+        let winner = if body_diff > 0 {
+            Some(0)
+        } else if body_diff < 0 {
+            Some(1)
+        } else if loss_diff > 0 {
+            Some(0)
+        } else if loss_diff < 0 {
+            Some(1)
+        } else {
+            None
+        };
+
+        FinalResult {
+            terminal: self.is_terminal(max_turns),
+            reason: self.terminal_reason(max_turns),
+            body_scores,
+            final_scores,
+            losses: self.losses,
+            body_diff,
+            loss_diff,
+            winner,
+        }
+    }
 }
 
 fn birds_are_touching(a: &BirdState, b: &BirdState) -> bool {
@@ -474,7 +559,7 @@ fn birds_are_touching(a: &BirdState, b: &BirdState) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BirdCommand, GameState, PlayerAction};
+    use super::{BirdCommand, GameState, PlayerAction, TerminalReason};
     use crate::{Coord, Direction, Grid, TileType};
 
     fn action(entries: &[(i32, BirdCommand)]) -> PlayerAction {
@@ -679,5 +764,64 @@ mod tests {
             vec![Coord::new(4, 2), Coord::new(4, 3), Coord::new(4, 4)]
         );
         assert_eq!(state.losses, [1, 1]);
+    }
+
+    #[test]
+    fn turn_cap_is_contest_terminal_but_not_natural_game_over() {
+        let mut grid = Grid::new(5, 5);
+        for x in 0..5 {
+            grid.set(Coord::new(x, 4), TileType::Wall);
+        }
+        grid.apples.push(Coord::new(2, 1));
+        let mut state = GameState::new(grid);
+        state.turn = 199;
+        state.add_bird(
+            0,
+            0,
+            vec![Coord::new(1, 2), Coord::new(1, 3), Coord::new(1, 4)],
+            Some(Direction::North),
+        );
+        state.add_bird(
+            1,
+            1,
+            vec![Coord::new(3, 2), Coord::new(3, 3), Coord::new(3, 4)],
+            Some(Direction::North),
+        );
+
+        state.step(&PlayerAction::default(), &PlayerAction::default());
+
+        assert!(!state.is_game_over());
+        assert!(state.is_terminal(200));
+        assert_eq!(
+            state.terminal_reason(200),
+            Some(TerminalReason::TurnLimitReached)
+        );
+    }
+
+    #[test]
+    fn final_result_uses_losses_only_as_tiebreak() {
+        let mut grid = Grid::new(4, 4);
+        grid.apples.push(Coord::new(0, 0));
+        let mut state = GameState::new(grid);
+        state.turn = 200;
+        state.losses = [3, 1];
+        state.add_bird(
+            0,
+            0,
+            vec![Coord::new(0, 1), Coord::new(0, 2), Coord::new(0, 3)],
+            Some(Direction::North),
+        );
+        state.add_bird(
+            1,
+            1,
+            vec![Coord::new(3, 1), Coord::new(3, 2), Coord::new(3, 3)],
+            Some(Direction::North),
+        );
+
+        let result = state.final_result(200);
+
+        assert_eq!(result.body_diff, 0);
+        assert_eq!(result.loss_diff, -2);
+        assert_eq!(result.winner, Some(1));
     }
 }

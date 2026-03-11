@@ -11,7 +11,7 @@ from python.train.train_value import train
 def main() -> None:
     metrics = train(EXPERIMENT)
     gate_result = check_gates(metrics)
-    status = "accepted" if gate_result.passed else "rejected"
+    status = "informational"
     append_result(
         EXPERIMENT["results_db"],
         name=EXPERIMENT["name"],

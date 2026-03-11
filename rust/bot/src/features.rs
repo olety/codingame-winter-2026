@@ -1,5 +1,7 @@
 use serde::Serialize;
-use snakebot_engine::{Coord, GameState, TileType};
+use snakebot_engine::{Coord, FinalResult, GameState, OracleState, TileType};
+
+use crate::search::SearchStats;
 
 pub const GRID_CHANNELS: usize = 8;
 pub const SCALAR_FEATURES: usize = 6;
@@ -13,10 +15,40 @@ pub struct EncodedPosition {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TrainingRow {
+    pub schema_version: u32,
+    pub git_sha: String,
+    pub config_hash: String,
+    pub seed: i64,
+    pub game_id: String,
+    pub turn: i32,
+    pub owner: usize,
+    pub raw_state_hash: String,
+    pub encoded_view_hash: String,
     pub grid: Vec<Vec<Vec<f32>>>,
     pub scalars: Vec<f32>,
     pub value: f32,
     pub weight: f32,
+    pub final_body_diff: i32,
+    pub final_loss_diff: i32,
+    pub winner: Option<usize>,
+    pub chosen_action_id: usize,
+    pub joint_action_count: usize,
+    pub root_values: Vec<f32>,
+    pub search_stats: SearchStats,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrainingMetadata {
+    pub schema_version: u32,
+    pub git_sha: String,
+    pub config_hash: String,
+    pub seed: i64,
+    pub game_id: String,
+    pub turn: i32,
+    pub chosen_action_id: usize,
+    pub joint_action_count: usize,
+    pub root_values: Vec<f32>,
+    pub search_stats: SearchStats,
 }
 
 pub fn encode_position(state: &GameState, owner: usize) -> EncodedPosition {
@@ -38,7 +70,11 @@ pub fn encode_position(state: &GameState, owner: usize) -> EncodedPosition {
     }
 
     for bird in state.birds.iter().filter(|bird| bird.alive) {
-        let channels = if bird.owner == owner { (2, 3, 6) } else { (4, 5, 7) };
+        let channels = if bird.owner == owner {
+            (2, 3, 6)
+        } else {
+            (4, 5, 7)
+        };
         let head = canonical_coord(state, owner, bird.head());
         grid[channels.0][head.y as usize][head.x as usize] = 1.0;
         for segment in bird.body.iter().skip(1) {
@@ -59,15 +95,53 @@ pub fn encode_position(state: &GameState, owner: usize) -> EncodedPosition {
     }
 }
 
-pub fn encode_training_row(state: &GameState, owner: usize, final_scores: [i32; 2]) -> TrainingRow {
+pub fn encode_training_row(
+    state: &GameState,
+    owner: usize,
+    final_result: &FinalResult,
+    metadata: TrainingMetadata,
+) -> TrainingRow {
     let encoded = encode_position(state, owner);
-    let score_diff = (final_scores[owner] - final_scores[1 - owner]) as f32;
+    let score_diff =
+        (final_result.final_scores[owner] - final_result.final_scores[1 - owner]) as f32;
+    let raw_state_hash = stable_hash(
+        &serde_json::to_vec(&OracleState::from_game_state(state)).expect("oracle state hashable"),
+    );
+    let encoded_view_hash =
+        stable_hash(&serde_json::to_vec(&encoded).expect("encoded position hashable"));
     TrainingRow {
+        schema_version: metadata.schema_version,
+        git_sha: metadata.git_sha,
+        config_hash: metadata.config_hash,
+        seed: metadata.seed,
+        game_id: metadata.game_id,
+        turn: metadata.turn,
+        owner,
+        raw_state_hash,
+        encoded_view_hash,
         grid: encoded.grid,
         scalars: encoded.scalars,
         value: (score_diff / VALUE_SCALE).tanh(),
         weight: 1.0,
+        final_body_diff: final_result.body_diff_for(owner),
+        final_loss_diff: final_result.loss_diff_for(owner),
+        winner: final_result
+            .winner
+            .map(|winner| if winner == owner { owner } else { 1 - owner }),
+        chosen_action_id: metadata.chosen_action_id,
+        joint_action_count: metadata.joint_action_count,
+        root_values: metadata.root_values,
+        search_stats: metadata.search_stats,
     }
+}
+
+fn stable_hash(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn scalar_features(state: &GameState, owner: usize) -> Vec<f32> {
@@ -75,7 +149,8 @@ fn scalar_features(state: &GameState, owner: usize) -> Vec<f32> {
     let live_diff = live_bird_count(state, owner) as f32 - live_bird_count(state, 1 - owner) as f32;
     let breakpoint_diff =
         breakpoint_count(state, owner) as f32 - breakpoint_count(state, 1 - owner) as f32;
-    let mobility_diff = mobility_count(state, owner) as f32 - mobility_count(state, 1 - owner) as f32;
+    let mobility_diff =
+        mobility_count(state, owner) as f32 - mobility_count(state, 1 - owner) as f32;
 
     vec![
         (state.turn as f32 / 200.0).clamp(0.0, 1.0),
@@ -96,7 +171,10 @@ fn canonical_coord(state: &GameState, owner: usize, coord: Coord) -> Coord {
 }
 
 fn live_bird_count(state: &GameState, owner: usize) -> usize {
-    state.birds_for_player(owner).filter(|bird| bird.alive).count()
+    state
+        .birds_for_player(owner)
+        .filter(|bird| bird.alive)
+        .count()
 }
 
 fn breakpoint_count(state: &GameState, owner: usize) -> usize {

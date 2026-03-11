@@ -158,7 +158,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .copied()
         .filter(|coord| {
             grid.get(*coord) == Some(TileType::Wall)
-                && grid.get_free_above(*coord, snakebot_engine::mapgen::SPAWN_HEIGHT).len()
+                && grid
+                    .get_free_above(*coord, snakebot_engine::mapgen::SPAWN_HEIGHT)
+                    .len()
                     == snakebot_engine::mapgen::SPAWN_HEIGHT as usize
         })
         .collect();
@@ -181,7 +183,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             for neighbour in grid.neighbours(coord, &Grid::ADJACENCY_8) {
-                if grid.spawns.contains(&neighbour) || grid.spawns.contains(&grid.opposite(neighbour))
+                if grid.spawns.contains(&neighbour)
+                    || grid.spawns.contains(&grid.opposite(neighbour))
                 {
                     too_close = true;
                     break;
@@ -216,14 +219,23 @@ fn dump(stage: &str, grid: &Grid, lower_by: Option<i32>) {
     }
     payload.insert("width".into(), serde_json::json!(grid.width));
     payload.insert("height".into(), serde_json::json!(grid.height));
-    payload.insert("walls".into(), serde_json::json!(coord_vec(
-        grid.coords()
-            .into_iter()
-            .filter(|coord| grid.get(*coord) == Some(TileType::Wall))
-            .collect()
-    )));
-    payload.insert("apples".into(), serde_json::json!(coord_vec(grid.apples.clone())));
-    payload.insert("spawns".into(), serde_json::json!(coord_vec(grid.spawns.clone())));
+    payload.insert(
+        "walls".into(),
+        serde_json::json!(coord_vec(
+            grid.coords()
+                .into_iter()
+                .filter(|coord| grid.get(*coord) == Some(TileType::Wall))
+                .collect()
+        )),
+    );
+    payload.insert(
+        "apples".into(),
+        serde_json::json!(coord_vec(grid.apples.clone())),
+    );
+    payload.insert(
+        "spawns".into(),
+        serde_json::json!(coord_vec(grid.spawns.clone())),
+    );
     println!("{}", serde_json::Value::Object(payload));
 }
 

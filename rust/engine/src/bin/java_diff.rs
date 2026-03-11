@@ -66,7 +66,11 @@ fn parse_args() -> Result<DiffConfig, Box<dyn Error>> {
                 config.max_turns = args.next().ok_or("missing value for --turns")?.parse()?;
             }
             "--init-source" => {
-                config.init_source = match args.next().ok_or("missing value for --init-source")?.as_str() {
+                config.init_source = match args
+                    .next()
+                    .ok_or("missing value for --init-source")?
+                    .as_str()
+                {
                     "java" => InitSource::Java,
                     "rust" => InitSource::Rust,
                     other => return Err(format!("unknown init source: {other}").into()),
