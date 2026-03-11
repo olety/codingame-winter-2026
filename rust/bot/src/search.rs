@@ -510,6 +510,8 @@ fn direction_to_word(direction: Direction) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use snakebot_engine::{initial_state_from_seed, Coord, Direction, GameState, Grid, PlayerAction, TileType};
 
     use crate::config::BotConfig;
@@ -518,6 +520,12 @@ mod tests {
         choose_action, choose_action_unlimited, deepen_branch, live_budget_for_turn,
         refresh_root_analysis, render_action, simulate_state, SearchBudget,
     };
+
+    fn regression_config() -> BotConfig {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        BotConfig::load(manifest_dir.join("configs/test_search_regression_v1.json"))
+            .expect("search regression config should load")
+    }
 
     #[test]
     fn render_wait_when_no_turns_needed() {
@@ -784,7 +792,7 @@ mod tests {
 
     #[test]
     fn deepening_can_change_the_real_root_choice() {
-        let deep_config = BotConfig::default();
+        let deep_config = regression_config();
         let mut shallow_config = deep_config.clone();
         shallow_config.search.deepen_top_my = 0;
         shallow_config.search.deepen_top_opp = 0;

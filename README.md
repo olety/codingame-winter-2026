@@ -8,6 +8,7 @@ Current status:
 - Rust contest bot with embedded submission config and corrected depth-2 refinement
 - release-mode Rust arena harness with frozen seed suites
 - Java-referee smoke canary that validates the built candidate artifact and behavior hashes
+- staged release-mode search sweep helper with smoke filtering and heldout/shadow finalist evaluation
 - deterministic self-play export and local Python value-training pipeline
 
 ## Repository layout
@@ -51,6 +52,14 @@ python3 -m python.train.run_arena \
 ```
 
 If the candidate is behavior-identical to the incumbent, `run_arena` now returns an informational no-op instead of treating it as a meaningful self-match.
+
+Run the staged search sweep helper:
+
+```bash
+python3 -m python.train.sweep_search
+```
+
+That script does a smoke-suite topology pass first, then a heldout/shadow finalist pass, and can optionally promote the winning config.
 
 ## Self-play and training
 

@@ -68,6 +68,7 @@ Wrapper scripts:
 
 - `python/train/run_local_experiment.py`
 - `python/train/run_arena.py`
+- `python/train/sweep_search.py`
 
 ## Recent smoke runs
 
@@ -90,3 +91,4 @@ That exported `160` rows and completed an `mps` training smoke.
 - Small smoke datasets can still produce tiny validation sets, so training metrics from those runs are only sanity checks.
 - The current network is still value-only and still uses the pooled 8-channel encoding.
 - The next meaningful ML step should come after stronger search/self-play targets, not before.
+- The sweep helper is now the preferred way to search the current Rust baseline; ML should stay behind that loop until a real promoted incumbent exists.

@@ -167,7 +167,7 @@ fn write_canonical_json(value: &Value, out: &mut String) {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{artifact_hash_bytes, behavior_hash, BotConfig};
+    use super::{artifact_hash_bytes, artifact_hash_file, behavior_hash, behavior_hash_file, BotConfig};
 
     #[test]
     fn embedded_config_matches_submission_file() {
@@ -190,5 +190,19 @@ mod tests {
         left.name = "left".to_owned();
         right.name = "right".to_owned();
         assert_eq!(behavior_hash(&left), behavior_hash(&right));
+    }
+
+    #[test]
+    fn shared_hash_fixture_matches_expected_constants() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest_dir.join("configs/test_search_regression_v1.json");
+        assert_eq!(
+            artifact_hash_file(&path).expect("fixture artifact hash"),
+            "3de772bb0ad664f0"
+        );
+        assert_eq!(
+            behavior_hash_file(&path).expect("fixture behavior hash"),
+            "da326fa964e7bea0"
+        );
     }
 }

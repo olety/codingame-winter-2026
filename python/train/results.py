@@ -9,11 +9,13 @@ from typing import Any
 CURRENT_ACCEPTANCE_VERSION = 3
 
 WEIGHTS = {
-    "heldout_body_diff": 0.45,
+    "heldout_body_diff": 0.40,
     "heldout_win_margin": 0.25,
+    "heldout_tiebreak_win_rate": 0.05,
     "shadow_body_diff": 0.10,
-    "validation_correlation": 0.15,
-    "validation_score": 0.10,
+    "shadow_tiebreak_win_rate": 0.05,
+    "validation_correlation": 0.10,
+    "validation_score": 0.05,
 }
 
 GATES = {

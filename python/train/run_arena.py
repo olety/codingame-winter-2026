@@ -51,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 1) - 2))
     parser.add_argument("--results-db", type=Path, default=REPO_ROOT / "python/train/results.sqlite")
     parser.add_argument("--name", type=str, default="arena_eval")
+    parser.add_argument("--skip-java-smoke", action="store_true")
     return parser.parse_args()
 
 
@@ -157,13 +158,21 @@ def main() -> None:
         args.league,
         args.jobs,
     )
-    smoke = run_java_smoke(
-        league=args.league,
-        seed_file=REPO_ROOT / "config/arena/smoke_v1.txt",
-        boss_count=4,
-        mirror_count=4,
-        candidate_config=args.candidate_config,
-    )
+    if args.skip_java_smoke:
+        smoke = {
+            "skipped": True,
+            "passed": True,
+            "embedded_config_artifact_hash": None,
+            "embedded_config_behavior_hash": None,
+        }
+    else:
+        smoke = run_java_smoke(
+            league=args.league,
+            seed_file=REPO_ROOT / "config/arena/smoke_v1.txt",
+            boss_count=4,
+            mirror_count=4,
+            candidate_config=args.candidate_config,
+        )
 
     heldout_win_margin = (heldout["wins"] - heldout["losses"]) / max(heldout["matches"], 1)
     metrics = {
@@ -180,12 +189,15 @@ def main() -> None:
         "shadow_suite_name": shadow["suite_name"],
         "heldout_body_diff": heldout["average_body_diff"],
         "heldout_win_margin": heldout_win_margin,
+        "heldout_tiebreak_win_rate": heldout["tiebreak_win_rate"],
         "shadow_body_diff": shadow["average_body_diff"],
+        "shadow_tiebreak_win_rate": shadow["tiebreak_win_rate"],
         "opening_move_max_ms": heldout["side_a"]["opening_move_max_ms"],
         "opening_move_p95_ms": heldout["side_a"]["opening_move_p95_ms"],
         "later_turn_p95_ms": heldout["side_a"]["later_move_p95_ms"],
         "later_turn_p99_ms": heldout["side_a"]["later_move_p99_ms"],
         "java_smoke_passed": float(smoke["passed"]),
+        "java_smoke_skipped": float(bool(smoke.get("skipped"))),
         "java_smoke_embedded_artifact_hash": smoke["embedded_config_artifact_hash"],
         "java_smoke_embedded_behavior_hash": smoke["embedded_config_behavior_hash"],
     }

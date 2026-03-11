@@ -44,6 +44,7 @@ This directory is the local, W&B-free training side of the Rust search/value pip
 - `python -m python.train.run_local_experiment`
 - `python -m python.train.run_arena`
 - `python -m python.train.java_smoke`
+- `python -m python.train.sweep_search`
 
 ## Optional Java oracle map dumps
 
@@ -139,6 +140,27 @@ Notes:
 - Java smoke now verifies that the built bot artifact embeds the same candidate artifact and behavior hashes that arena evaluated.
 - `run_arena` treats candidate/incumbent behavior self-matches as informational no-ops instead of pretending they are meaningful arena results.
 - Both scripts use release-mode Rust binaries.
+- Arena payloads now also report heldout/shadow tiebreak win rate for sweep ranking and post-run review.
+
+## Staged search sweep
+
+Run the staged sweep helper:
+
+```bash
+python -m python.train.sweep_search
+```
+
+Behavior:
+
+- stage 1 sweeps search topology on `smoke_v1` and skips Java smoke for speed
+- stage 2 reruns the best topology finalists on `heldout_v1` + `shadow_v1` with full Java smoke
+- `--promote` will rotate the old submission config into `incumbent_current.json` and write the winning candidate into `submission_current.json`
+
+The default search grid is:
+
+- `deepen_top_my`, `deepen_top_opp` in `{4, 6, 8}`
+- `deepen_child_my`, `deepen_child_opp` in `{3, 4, 5}`
+- `later_turn_ms` in `{38, 40, 42}`
 
 ## Notes
 
