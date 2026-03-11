@@ -14,12 +14,14 @@ The repository now has:
 - semantic behavior hashes alongside raw artifact hashes for config identity and promotion logic
 - split opening/later-turn arena timing so only later turns are hard-gated
 - a staged release-mode search sweep helper with smoke filtering and heldout/shadow finalist evaluation
+- stage-1 sweep screening that no longer pollutes authoritative acceptance results
 
-The newest local commit after the original simulator/bot work is:
+The newest local commits after the original simulator/bot work are:
 
 - `43d7d1c` `Add arena evaluation and deterministic search upgrades`
 - `0eec4d7` `Tighten evaluation hashes and arena timing gates`
-- plus the current uncommitted follow-up for staged sweep, tiebreak reporting, and frozen regression/hash fixtures
+- `e93927b` `Add staged search sweep and regression fixtures`
+- plus the current uncommitted follow-up for stage-1 screening status and sweep arena-build reuse
 
 The most important current checks that passed are:
 
@@ -73,6 +75,7 @@ Detailed follow-up docs:
 - Arena now distinguishes raw artifact identity from semantic behavior identity, short-circuits behavior self-matches, and records opening/later timing buckets separately.
 - Arena results now carry heldout/shadow tiebreak win rates, and the search regression is frozen on a dedicated test config instead of the live embedded submission config.
 - The repo now includes a staged release-mode sweep runner plus a shared Rust/Python hash fixture test so config hashing and sweep evaluation can evolve without drifting silently.
+- Stage-1 sweep runs are now explicitly `screening`, not `accepted`/`rejected`, and the sweep reuses one prebuilt release `arena` binary instead of rebuilding it per candidate.
 - Self-play now defaults to Rust-generated seeds, records explicit budget type/value plus both config hashes, and can train directly from shard directories without mandatory merging.
 
 ## Recommended Next Read

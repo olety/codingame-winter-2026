@@ -59,7 +59,7 @@ Run the staged search sweep helper:
 python3 -m python.train.sweep_search
 ```
 
-That script does a smoke-suite topology pass first, then a heldout/shadow finalist pass, and can optionally promote the winning config.
+That script prebuilds the release `arena` binary once, runs a smoke-suite topology screening pass first, then a heldout/shadow authoritative finalist pass, and can optionally promote the winning config.
 
 ## Self-play and training
 

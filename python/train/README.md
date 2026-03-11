@@ -152,7 +152,7 @@ python -m python.train.sweep_search
 
 Behavior:
 
-- stage 1 sweeps search topology on `smoke_v1` and skips Java smoke for speed
+- stage 1 sweeps search topology on `smoke_v1`, prebuilds the release `arena` binary once, skips Java smoke for speed, and records `screening` results instead of authoritative acceptance
 - stage 2 reruns the best topology finalists on `heldout_v1` + `shadow_v1` with full Java smoke
 - `--promote` will rotate the old submission config into `incumbent_current.json` and write the winning candidate into `submission_current.json`
 

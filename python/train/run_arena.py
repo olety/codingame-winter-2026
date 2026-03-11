@@ -52,6 +52,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results-db", type=Path, default=REPO_ROOT / "python/train/results.sqlite")
     parser.add_argument("--name", type=str, default="arena_eval")
     parser.add_argument("--skip-java-smoke", action="store_true")
+    parser.add_argument(
+        "--evaluation-mode",
+        choices=("authoritative", "screening"),
+        default="authoritative",
+    )
+    parser.add_argument("--arena-bin", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -107,6 +113,7 @@ def main() -> None:
     if candidate_behavior_hash == incumbent_behavior_hash:
         metrics = {
             "acceptance_version": ACCEPTANCE_VERSION,
+            "evaluation_mode": args.evaluation_mode,
             "candidate_config_artifact_hash": candidate_artifact_hash,
             "candidate_config_behavior_hash": candidate_behavior_hash,
             "incumbent_config_artifact_hash": incumbent_artifact_hash,
@@ -141,7 +148,7 @@ def main() -> None:
     if candidate_artifact_hash == incumbent_artifact_hash:
         print("warning: candidate config matches incumbent artifact hash", file=sys.stderr)
 
-    arena_bin = build_release_arena()
+    arena_bin = args.arena_bin.resolve() if args.arena_bin is not None else build_release_arena()
     heldout = run_arena_binary(
         arena_bin,
         args.candidate_config,
@@ -177,6 +184,7 @@ def main() -> None:
     heldout_win_margin = (heldout["wins"] - heldout["losses"]) / max(heldout["matches"], 1)
     metrics = {
         "acceptance_version": ACCEPTANCE_VERSION,
+        "evaluation_mode": args.evaluation_mode,
         "candidate_config_artifact_hash": candidate_artifact_hash,
         "candidate_config_behavior_hash": candidate_behavior_hash,
         "incumbent_config_artifact_hash": incumbent_artifact_hash,
@@ -202,7 +210,7 @@ def main() -> None:
         "java_smoke_embedded_behavior_hash": smoke["embedded_config_behavior_hash"],
     }
     gate_result = check_gates(metrics)
-    status = (
+    authoritative_status = (
         "accepted"
         if heldout["average_body_diff"] > 0.0
         and heldout["wins"] >= heldout["losses"]
@@ -211,18 +219,24 @@ def main() -> None:
         and gate_result.passed
         else "rejected"
     )
+    status = "screening" if args.evaluation_mode == "screening" else authoritative_status
 
     append_result(
         args.results_db,
         name=args.name,
         status=status,
-        description="arena + java smoke evaluation",
+        description=(
+            "screening arena evaluation"
+            if args.evaluation_mode == "screening"
+            else "arena + java smoke evaluation"
+        ),
         metrics=metrics,
         failures=gate_result.failures,
         acceptance_version=ACCEPTANCE_VERSION,
     )
     payload = {
         "status": status,
+        "authoritative_status": authoritative_status,
         "composite_score": compute_composite(metrics),
         "failures": gate_result.failures,
         "metrics": metrics,

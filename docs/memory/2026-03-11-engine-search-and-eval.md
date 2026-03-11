@@ -95,7 +95,7 @@ Short checks that passed after the behavior-hash/timing split landed:
 
 - tiny 2-seed release-mode arena run against the root-only anchor: later-turn `p99` around `31 ms`
 - Java smoke on boss + mirror matches: passed with zero reported runner error counts
-- small staged sweep smoke run: stage-1 smoke filtering + stage-2 heldout/shadow candidate evaluation both completed end to end
+- small staged sweep smoke run: stage-1 wrote `screening` results only, stage-2 ran authoritative heldout/shadow evaluation, and the sweep reused one prebuilt release `arena` binary for the full run
 
 ## Still intentionally basic
 

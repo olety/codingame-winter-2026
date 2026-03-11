@@ -77,6 +77,15 @@ def dump_config(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def build_release_arena() -> Path:
+    subprocess.run(
+        ["cargo", "build", "--release", "-q", "-p", "snakebot-bot", "--bin", "arena"],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+    return REPO_ROOT / "target/release/arena"
+
+
 def run_arena(
     candidate_config: Path,
     args: argparse.Namespace,
@@ -85,6 +94,8 @@ def run_arena(
     shadow_suite: Path,
     name: str,
     skip_java_smoke: bool,
+    evaluation_mode: str,
+    arena_bin: Path,
 ) -> dict[str, Any]:
     cmd = [
         "python3",
@@ -108,6 +119,10 @@ def run_arena(
         str(args.results_db),
         "--name",
         name,
+        "--evaluation-mode",
+        evaluation_mode,
+        "--arena-bin",
+        str(arena_bin),
     ]
     if skip_java_smoke:
         cmd.append("--skip-java-smoke")
@@ -193,6 +208,7 @@ def main() -> None:
         shutil.rmtree(run_dir)
     candidate_dir = run_dir / "candidates"
     summary_path = run_dir / "summary.json"
+    arena_bin = build_release_arena()
 
     base_config = load_config(args.base_config)
     stage1_candidates = stage_topology_candidates(base_config, args, candidate_dir)
@@ -206,6 +222,8 @@ def main() -> None:
             shadow_suite=args.smoke_suite,
             name=f"{args.run_name}_stage1_{index:03d}",
             skip_java_smoke=True,
+            evaluation_mode="screening",
+            arena_bin=arena_bin,
         )
         result["candidate_config"] = str(candidate)
         stage1_results.append(result)
@@ -220,6 +238,8 @@ def main() -> None:
             shadow_suite=args.shadow_suite,
             name=f"{args.run_name}_stage2_{index:03d}",
             skip_java_smoke=False,
+            evaluation_mode="authoritative",
+            arena_bin=arena_bin,
         )
         result["candidate_config"] = str(candidate)
         stage2_results.append(result)
