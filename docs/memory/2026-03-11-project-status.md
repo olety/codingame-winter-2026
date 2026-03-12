@@ -119,7 +119,12 @@ Detailed follow-up docs:
 - Conclusion: the first true promotion has now happened. `submission_current.json` is the promoted `6/8/3/3` breadth-heavy winner, and `incumbent_current.json` remains the old `6/6/4/4` baseline for future comparisons.
 - New optimization read after the second native Prose VM run: simply pushing root breadth beyond `6/8/3/3` is not the next gain. The next promising search direction is to reduce root cost or make breadth more selective, because naive breadth increases are currently blowing the later-turn gate by roughly `4x`.
 - New hybrid read: root-prior-only hybrids are now timing-safe enough to evaluate seriously, but the best current candidate still loses to the incumbent on full heldout despite passing Java smoke. The correct next hybrid move is more candidate volume and better self-play/training diversity, not more infrastructure work.
-- Latest operational state: the current live technical risk is no longer “can Modal run the loop?” That is fixed. The open question is whether the restarted Prose run `20260312-183500-prose-hybrid02` can produce a stage-1-positive hybrid finalist once the Modal-backed worker batch finishes.
+- Latest operational state: the current live technical risk is no longer “can Modal run the loop?” That is fixed.
+- The first fully screened Prose+Modal hybrid batch under `20260312-183500-prose-hybrid02` is now complete:
+  - `hybrid-321ad4a35a7d`: heldout `-2.3125`, shadow `+4.0625`, later-turn `p99 = 41 ms`
+  - `hybrid-bbee0771fbae`: heldout `+5.75`, shadow `-0.625`, later-turn `p99 = 42 ms`
+  - `hybrid-f1214e08d3f3`: heldout `-3.0`, shadow `+0.25`, later-turn `p99 = 42 ms`
+- Interpretation: the first real Modal swarm batch worked and produced one aggressive hybrid candidate with a very strong tiny-screen heldout signal, but none of the three candidates was robust enough across the shadow check to justify a local authoritative stage-2 rerun.
 
 ## Recommended Next Read
 

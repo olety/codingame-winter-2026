@@ -362,3 +362,47 @@ So the correct interpretation is:
 - Prose-native orchestration is still working
 - Modal is now healthy again
 - the next missing data is candidate strength, not more infrastructure debugging
+
+## First fully-screened hybrid Prose batch
+
+The restarted Prose run `20260312-183500-prose-hybrid02` now has a complete stage-1 picture.
+
+Batch shape:
+
+- all three candidates were root-prior-only hybrids
+- Modal CPU self-play
+- Modal GPU training
+- Modal CPU stage-1 screening
+- local authoritative stage 2 reserved for finalists only
+
+There were two more integration fixes during this batch:
+
+1. finished candidate configs needed the `hybrid` block rewritten after training completed
+2. Modal screening needed the trained `hybrid_weights.json` staged into the remote temp directory instead of leaving a local absolute path in `weights_path`
+
+After those fixes, the three candidates screened to:
+
+- `hybrid-321ad4a35a7d`
+  - heldout body diff: `-2.3125`
+  - shadow body diff: `+4.0625`
+  - later-turn `p99`: `41 ms`
+- `hybrid-bbee0771fbae`
+  - heldout body diff: `+5.75`
+  - shadow body diff: `-0.625`
+  - later-turn `p99`: `42 ms`
+- `hybrid-f1214e08d3f3`
+  - heldout body diff: `-3.0`
+  - shadow body diff: `+0.25`
+  - later-turn `p99`: `42 ms`
+
+Interpretation:
+
+- the swarm/executor setup is now real and usable
+- hybrid candidates can train and screen in parallel on Modal without crashing
+- one candidate (`hybrid-bbee0771fbae`) produced a very strong tiny-screen heldout signal
+- but that same candidate regressed against the weak shadow anchor, so it is not yet a clean stage-2 finalist
+
+This is still progress. The failure mode is now strategic:
+
+- the loop can produce aggressive hybrid candidates
+- the remaining problem is robustness/generalization across opponent baselines, not basic execution
