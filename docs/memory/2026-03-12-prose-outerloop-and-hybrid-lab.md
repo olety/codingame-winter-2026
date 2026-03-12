@@ -112,6 +112,63 @@ Verified locally in this phase:
 
 The hybrid screening smoke was intentionally bad in strength/timing terms. That is not a regression result to optimize around; it only proves the candidate runner and artifact contracts work end to end.
 
+## Native Prose VM smoke run
+
+After the scaffold landed, the repo also got a real native Prose VM smoke run.
+
+Run state:
+
+- `.prose/runs/20260312-144527-prose01/`
+
+Important files:
+
+- `.prose/runs/20260312-144527-prose01/state.md`
+- `.prose/runs/20260312-144527-prose01/bindings/offspring.md`
+- `.prose/runs/20260312-144527-prose01/bindings/finalists.md`
+- `.prose/runs/20260312-144527-prose01/bindings/verdict.md`
+
+What the VM did:
+
+1. interpreted `automation/outerloop/outerloop.prose` inside the agent session
+2. spawned a planner session
+3. spawned three worker screening sessions in parallel
+4. spawned an evaluator session to pick one finalist
+5. spawned one worker authoritative-eval session
+6. spawned a final evaluator session to issue the verdict
+
+The three offspring were:
+
+- `search-37c207806429`
+- `search-02d93fb0e8a4`
+- `hybrid-c6941dcf7906`
+
+The hybrid candidate behaved exactly like an early hybrid smoke should: extremely slow and weak. The two search candidates both screened positively on the tiny temporary suites, and the evaluator chose `search-02d93fb0e8a4` for one stage-2 rerun.
+
+Stage-2 result on the tiny temporary suites:
+
+- candidate: `search-02d93fb0e8a4`
+- heldout body diff: `+5.0`
+- shadow body diff: `+11.75`
+- later-turn `p99`: `28 ms`
+- Java smoke: passed
+
+Final verdict:
+
+- `promising_smoke_only`
+- `promote: false`
+
+Reason:
+
+- the VM run was intentionally a tiny-suite runtime proof, not a real `heldout_v1` / `shadow_v1` promotion attempt
+- the correct next step for that exact candidate is a normal authoritative rerun on the real frozen suites
+
+This matters because it proves the Prose runtime model is actually viable in this repo:
+
+- the session can act as the VM
+- `.prose/runs/...` can hold durable execution state
+- the existing repo CLIs are sufficient worker surfaces
+- Helios can treat that filesystem state as UI data instead of reimplementing workflow logic
+
 ## Important limitation
 
 The single-file CodinGame submission artifact is intentionally still search-only.
