@@ -214,8 +214,18 @@ def _arena_screen_impl(spec_json: str) -> dict:
 
     with tempfile.TemporaryDirectory(prefix="snakebot-arena-screen-") as tmpdir:
         tmp = Path(tmpdir)
+        candidate_config_payload = json.loads(spec["candidate_config_json"])
+        if "weights_json" in spec:
+            weights_path = tmp / spec.get("weights_filename", "hybrid_weights.json")
+            weights_path.write_text(spec["weights_json"], encoding="utf-8")
+            hybrid = candidate_config_payload.get("hybrid")
+            if hybrid is not None:
+                hybrid["weights_path"] = str(weights_path)
         candidate_config_path = tmp / "candidate_config.json"
-        candidate_config_path.write_text(spec["candidate_config_json"], encoding="utf-8")
+        candidate_config_path.write_text(
+            json.dumps(candidate_config_payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         suite_path = _write_temp_suite(tmp, spec)
         results_db = tmp / "screening.sqlite"
         incumbent_config = _repo_relative_remote(spec["incumbent_config_path"])
@@ -278,52 +288,58 @@ def train_l40s(spec_json: str) -> dict:
     return _train_impl(spec_json)
 
 
-@app.function(
-    image=image,
-    gpu="H100",
-    cpu=6.0,
-    memory=49152,
-    timeout=60 * 60,
-    max_containers=8,
-)
-def train_h100(spec_json: str) -> dict:
-    return _train_impl(spec_json)
-
-
-@app.function(
-    image=image,
-    gpu="H200",
-    cpu=6.0,
-    memory=65536,
-    timeout=60 * 60,
-    max_containers=4,
-)
-def train_h200(spec_json: str) -> dict:
-    return _train_impl(spec_json)
-
-
-@app.function(
-    image=image,
-    gpu="B200",
-    cpu=6.0,
-    memory=65536,
-    timeout=60 * 60,
-    max_containers=4,
-)
-def train_b200(spec_json: str) -> dict:
-    return _train_impl(spec_json)
-
-
-@app.function(
-    image=image,
-    gpu="A100",
-    cpu=6.0,
-    memory=49152,
-    timeout=60 * 60,
-    max_containers=8,
-)
-def train_a100(spec_json: str) -> dict:
-    return _train_impl(spec_json)
+# Non-destructive note:
+# We are intentionally keeping the alternative GPU entrypoints commented out.
+# Right now the active training path is standardized on L40S to reduce ops noise
+# while the hybrid loop is still being stabilized. If a later experiment really
+# needs a different GPU tier, these definitions can be restored directly.
+#
+# @app.function(
+#     image=image,
+#     gpu="H100",
+#     cpu=6.0,
+#     memory=49152,
+#     timeout=60 * 60,
+#     max_containers=8,
+# )
+# def train_h100(spec_json: str) -> dict:
+#     return _train_impl(spec_json)
+#
+#
+# @app.function(
+#     image=image,
+#     gpu="H200",
+#     cpu=6.0,
+#     memory=65536,
+#     timeout=60 * 60,
+#     max_containers=4,
+# )
+# def train_h200(spec_json: str) -> dict:
+#     return _train_impl(spec_json)
+#
+#
+# @app.function(
+#     image=image,
+#     gpu="B200",
+#     cpu=6.0,
+#     memory=65536,
+#     timeout=60 * 60,
+#     max_containers=4,
+# )
+# def train_b200(spec_json: str) -> dict:
+#     return _train_impl(spec_json)
+#
+#
+# @app.function(
+#     image=image,
+#     gpu="A100",
+#     cpu=6.0,
+#     memory=49152,
+#     timeout=60 * 60,
+#     max_containers=8,
+# )
+# def train_a100(spec_json: str) -> dict:
+#     return _train_impl(spec_json)
 
 
 @app.function(
@@ -363,14 +379,17 @@ def _train_function_for_gpu(gpu_name: str) -> Callable[[str], dict]:
     normalized = gpu_name.strip().upper()
     if normalized in {"L40S", "L40"}:
         return train_l40s
-    if normalized == "H100":
-        return train_h100
-    if normalized == "H200":
-        return train_h200
-    if normalized == "B200":
-        return train_b200
-    if normalized == "A100":
-        return train_a100
+    # Non-destructive note:
+    # Other GPU tiers are intentionally disabled for now. Restore the commented
+    # branches above if we later want to reopen H100/H200/B200/A100 experiments.
+    # if normalized == "H100":
+    #     return train_h100
+    # if normalized == "H200":
+    #     return train_h200
+    # if normalized == "B200":
+    #     return train_b200
+    # if normalized == "A100":
+    #     return train_a100
     raise ValueError(f"unsupported modal gpu type: {gpu_name}")
 
 

@@ -230,6 +230,7 @@ def run_stage1(
     started_at = iso_now()
     executor = stage1_executor
     if executor == "modal-arena-screen":
+        config_payload = json.loads(config_path.read_text(encoding="utf-8"))
         suite_text = None
         try:
             relative_suite = args.smoke_suite.resolve().relative_to(REPO_ROOT.resolve())
@@ -238,13 +239,18 @@ def run_stage1(
             suite_path = None
             suite_text = args.smoke_suite.read_text(encoding="utf-8")
         modal_spec: dict[str, Any] = {
-            "candidate_config_json": config_path.read_text(encoding="utf-8"),
+            "candidate_config_json": json.dumps(config_payload, indent=2, sort_keys=True) + "\n",
             "incumbent_config_path": repo_relative_string(args.incumbent_config),
             "anchor_config_path": repo_relative_string(args.anchor_config),
             "suite_path": suite_path,
             "suite_name": args.smoke_suite.stem,
             "name": f"{run_id}_{candidate_id}_stage1",
         }
+        hybrid = config_payload.get("hybrid")
+        if hybrid is not None:
+            weights_path = Path(hybrid["weights_path"])
+            modal_spec["weights_json"] = weights_path.read_text(encoding="utf-8")
+            modal_spec["weights_filename"] = weights_path.name
         if suite_text is not None:
             modal_spec["suite_text"] = suite_text
         payload = run_json(
