@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -53,7 +53,7 @@ fn main() {
     );
     println!(
         "cargo:rustc-env=SNAKEBOT_EMBEDDED_CONFIG_BEHAVIOR_HASH={}",
-        behavior_hash(&raw)
+        behavior_hash(&raw, &config_path)
     );
 }
 
@@ -66,7 +66,7 @@ fn hash_bytes(bytes: &[u8]) -> String {
     format!("{hash:016x}")
 }
 
-fn behavior_hash(raw: &[u8]) -> String {
+fn behavior_hash(raw: &[u8], config_path: &Path) -> String {
     let parsed: Value =
         serde_json::from_slice(raw).expect("embedded config should be valid json for behavior hash");
     let eval = parsed
@@ -77,12 +77,44 @@ fn behavior_hash(raw: &[u8]) -> String {
         .get("search")
         .cloned()
         .expect("embedded config must contain search");
-    let canonical = json!({
+    let mut canonical = json!({
         "eval": eval,
         "search": search,
     });
+    if let Some(hybrid) = parsed.get("hybrid") {
+        canonical["hybrid"] = hybrid_behavior_value(hybrid, config_path.parent());
+    }
     let bytes = canonical_json_bytes(&canonical);
     hash_bytes(&bytes)
+}
+
+fn hybrid_behavior_value(value: &Value, config_dir: Option<&Path>) -> Value {
+    let mut hybrid = value.clone();
+    if let Some(path) = hybrid
+        .get("weights_path")
+        .and_then(|entry| entry.as_str())
+        .map(str::to_owned)
+    {
+        let resolved = config_dir
+            .map(|dir| dir.join(&path))
+            .filter(|candidate| candidate.exists())
+            .unwrap_or_else(|| PathBuf::from(&path));
+        if resolved.exists() {
+            println!("cargo:rerun-if-changed={}", resolved.display());
+            if let Some(object) = hybrid.as_object_mut() {
+                object.remove("weights_path");
+                object.insert(
+                    "weights".to_owned(),
+                    json!({
+                        "artifact_hash": hash_bytes(
+                            &fs::read(&resolved).expect("hybrid weights should be readable")
+                        ),
+                    }),
+                );
+            }
+        }
+    }
+    hybrid
 }
 
 fn canonical_json_bytes(value: &Value) -> Vec<u8> {

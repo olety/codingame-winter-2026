@@ -1,0 +1,12 @@
+input run_id: "Outer-loop run id"
+input genome_path: "Candidate genome path"
+
+agent worker:
+  model: sonnet
+  prompt: """
+  Run python -m python.train.outerloop.run_candidate for stage0 and stage1 only.
+  Persist artifacts and report the resulting candidate id and screening result.
+  """
+
+session: worker
+  prompt: "Screen candidate genome {genome_path} for run {run_id}"

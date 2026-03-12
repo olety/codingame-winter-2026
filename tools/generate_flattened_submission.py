@@ -99,10 +99,20 @@ def rewrite_bot_module(name: str, source: str) -> str:
             "use crate::config::EvalWeights;": "use super::config::EvalWeights;",
             "snakebot_engine::TileType::Wall": "TileType::Wall",
         },
+        "features": {
+            "use snakebot_engine::{BirdCommand, Coord, Direction, FinalResult, GameState, OracleState, PlayerAction, TileType};": "use crate::engine::{BirdCommand, Coord, Direction, FinalResult, GameState, OracleState, PlayerAction, TileType};",
+            "use crate::search::SearchStats;": "use super::search::SearchStats;",
+        },
+        "hybrid": {
+            "use snakebot_engine::{GameState, PlayerAction};": "use crate::engine::{GameState, PlayerAction};",
+            "use crate::config::{BotConfig, HybridConfig};": "use super::config::{BotConfig, HybridConfig};",
+            "use crate::features::{encode_hybrid_position, policy_targets_for_action, HYBRID_GRID_CHANNELS, MAX_BIRDS_PER_PLAYER, POLICY_ACTIONS_PER_BIRD, SCALAR_FEATURES};": "use super::features::{encode_hybrid_position, policy_targets_for_action, HYBRID_GRID_CHANNELS, MAX_BIRDS_PER_PLAYER, POLICY_ACTIONS_PER_BIRD, SCALAR_FEATURES};",
+        },
         "search": {
             "use snakebot_engine::{BirdCommand, Direction, GameState, PlayerAction};": "use crate::engine::{BirdCommand, Direction, GameState, PlayerAction};",
             "use crate::config::BotConfig;": "use super::config::BotConfig;",
             "use crate::eval::evaluate;": "use super::eval::evaluate;",
+            "use crate::hybrid::{leaf_bonus, predict, HybridPrediction};": "use super::hybrid::{leaf_bonus, predict, HybridPrediction};",
         },
     }
     for needle, repl in replacements.get(name, {}).items():
@@ -118,7 +128,21 @@ def build_config_module(config_path: Path) -> str:
     payload = json.loads(load_text(config_path))
     eval_payload = payload["eval"]
     search_payload = payload["search"]
+    hybrid_payload = payload.get("hybrid")
     name_literal = json.dumps(payload["name"])
+    hybrid_literal = "None"
+    if hybrid_payload:
+        weights_path = json.dumps(hybrid_payload.get("weights_path"))
+        hybrid_literal = textwrap.dedent(
+            f"""
+            Some(HybridConfig {{
+                weights_path: {weights_path}.map(str::to_owned),
+                prior_mix: {hybrid_payload.get("prior_mix", 0.0)},
+                leaf_mix: {hybrid_payload.get("leaf_mix", 0.0)},
+                value_scale: {hybrid_payload.get("value_scale", 48.0)},
+            }})
+            """
+        ).strip()
     return textwrap.dedent(
         f"""
         #[derive(Clone, Copy, Debug, PartialEq)]
@@ -174,10 +198,36 @@ def build_config_module(config_path: Path) -> str:
         }}
 
         #[derive(Clone, Debug, PartialEq)]
+        pub struct HybridConfig {{
+            pub weights_path: Option<String>,
+            pub prior_mix: f64,
+            pub leaf_mix: f64,
+            pub value_scale: f64,
+        }}
+
+        impl Default for HybridConfig {{
+            fn default() -> Self {{
+                Self {{
+                    weights_path: None,
+                    prior_mix: 0.0,
+                    leaf_mix: 0.0,
+                    value_scale: 48.0,
+                }}
+            }}
+        }}
+
+        impl HybridConfig {{
+            pub fn is_enabled(&self) -> bool {{
+                self.weights_path.is_some() && (self.prior_mix != 0.0 || self.leaf_mix != 0.0)
+            }}
+        }}
+
+        #[derive(Clone, Debug, PartialEq)]
         pub struct BotConfig {{
             pub name: String,
             pub eval: EvalWeights,
             pub search: SearchConfig,
+            pub hybrid: Option<HybridConfig>,
         }}
 
         impl Default for BotConfig {{
@@ -192,9 +242,40 @@ def build_config_module(config_path: Path) -> str:
                     name: {name_literal}.to_owned(),
                     eval: EvalWeights::default(),
                     search: SearchConfig::default(),
+                    hybrid: {hybrid_literal},
                 }}
             }}
         }}
+        """
+    ).strip() + "\n"
+
+
+def build_minimal_features_module() -> str:
+    return "// search-only flattened submission does not need training features\n"
+
+
+def build_disabled_hybrid_module() -> str:
+    return textwrap.dedent(
+        """
+        use crate::engine::{GameState, PlayerAction};
+        use super::config::{BotConfig, HybridConfig};
+
+        #[derive(Clone, Debug)]
+        pub struct HybridPrediction;
+
+        impl HybridPrediction {
+            pub fn action_prior(&self, _state: &GameState, _owner: usize, _action: &PlayerAction) -> f64 {
+                0.0
+            }
+        }
+
+        pub fn predict(_state: &GameState, _owner: usize, _config: &BotConfig) -> Option<HybridPrediction> {
+            None
+        }
+
+        pub fn leaf_bonus(_prediction: &HybridPrediction, _hybrid: &HybridConfig) -> f64 {
+            0.0
+        }
         """
     ).strip() + "\n"
 
@@ -332,6 +413,8 @@ def main() -> None:
     args = parse_args()
     config_path = args.config.resolve()
     output_path = args.output.resolve()
+    config_payload = json.loads(load_text(config_path))
+    hybrid_enabled = bool(config_payload.get("hybrid"))
 
     engine_dir = REPO_ROOT / "rust/engine/src"
     bot_dir = REPO_ROOT / "rust/bot/src"
@@ -342,6 +425,13 @@ def main() -> None:
     state = rewrite_engine_module("state", load_text(engine_dir / "state.rs"))
     input_mod = rewrite_bot_module("input", load_text(bot_dir / "input.rs"))
     eval_mod = rewrite_bot_module("eval", load_text(bot_dir / "eval.rs"))
+    if hybrid_enabled:
+        raise SystemExit(
+            "flattened single-file generation does not yet support hybrid-enabled configs; "
+            "promote a search-only config or extend the generator to embed weights first"
+        )
+    features_mod = build_minimal_features_module()
+    hybrid_mod = build_disabled_hybrid_module()
     search_mod = rewrite_bot_module("search", load_text(bot_dir / "search.rs"))
     config_mod = build_config_module(config_path)
     main_mod = build_main_module()
@@ -369,6 +459,8 @@ def main() -> None:
             "mod bot {",
             textwrap.indent(wrap_module("config", config_mod).rstrip(), "    "),
             textwrap.indent(wrap_module("eval", eval_mod).rstrip(), "    "),
+            textwrap.indent(wrap_module("features", features_mod).rstrip(), "    "),
+            textwrap.indent(wrap_module("hybrid", hybrid_mod).rstrip(), "    "),
             textwrap.indent(wrap_module("input", input_mod).rstrip(), "    "),
             textwrap.indent(wrap_module("search", search_mod).rstrip(), "    "),
             "}",

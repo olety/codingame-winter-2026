@@ -5,7 +5,7 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use snakebot_bot::config::{artifact_hash_file, behavior_hash_file, BotConfig};
-use snakebot_bot::features::{encode_training_row, TrainingMetadata};
+use snakebot_bot::features::{encode_training_row, policy_targets_for_action, TrainingMetadata};
 use snakebot_bot::search::SearchBudget;
 use snakebot_bot::selfplay::{play_and_collect, SelfPlayConfig};
 use snakebot_engine::{initial_state_from_seed, load_dump_records};
@@ -113,6 +113,11 @@ fn export_game(
                 chosen_action_id: position.outcome.action_id,
                 joint_action_count: position.outcome.action_count,
                 root_values: position.outcome.root_values,
+                policy_targets: policy_targets_for_action(
+                    &position.state,
+                    position.owner,
+                    &position.outcome.action,
+                ),
                 budget_type: config.budget.budget_type().to_owned(),
                 budget_value: config.budget.budget_value(),
                 search_stats: position.outcome.stats,

@@ -11,6 +11,8 @@ The repository now has:
 - a release-mode Rust arena harness with frozen seed suites
 - a real Java-referee smoke canary for live I/O/reconciliation checks on the exact built candidate artifact
 - a deterministic self-play/export path with Rust-generated seeds by default and a grouped Python value-training pipeline
+- a Prose-first outer-loop scaffold with candidate manifests, git worktrees, staged evaluation, and promotion helpers
+- a tiny hybrid policy+value branch with identity-preserving features, local/Modal training hooks, Rust-side prior/leaf integration, and weight export
 - semantic behavior hashes alongside raw artifact hashes for config identity and promotion logic
 - split opening/later-turn arena timing so only later turns are hard-gated
 - a staged release-mode search sweep helper with smoke filtering and heldout/shadow finalist evaluation
@@ -25,6 +27,11 @@ The newest local commits after the original simulator/bot work are:
 - `e93927b` `Add staged search sweep and regression fixtures`
 - `be7cb69` `Fix sweep screening status and arena build reuse`
 - `c6aa257` `Add flattened submission generator and artifact`
+
+The current important limitation is:
+
+- the generated single-file submission artifact is still search-only
+- hybrid-enabled configs can now be trained and evaluated locally, but `tools/generate_flattened_submission.py` will fail explicitly until one-file hybrid weight embedding exists
 
 The most important current checks that passed are:
 
@@ -81,6 +88,9 @@ Detailed follow-up docs:
 - Stage-1 sweep runs are now explicitly `screening`, not `accepted`/`rejected`, and the sweep reuses one prebuilt release `arena` binary instead of rebuilding it per candidate.
 - Self-play now defaults to Rust-generated seeds, records explicit budget type/value plus both config hashes, and can train directly from shard directories without mandatory merging.
 - The repo now also includes `tools/generate_flattened_submission.py`, which emits the pasteable `submission/flattened_main.rs` artifact and should be rerun after live bot/config changes.
+- The repo now also includes a Prose-controlled outer-loop lab under `automation/outerloop` and `python/train/outerloop`, with run manifests under `artifacts/outerloop/runs/<run_id>/manifest.json` and candidate stage artifacts under `artifacts/outerloop/runs/<run_id>/candidates/<candidate_id>/`.
+- The hybrid branch is now present end to end: self-play exports `hybrid_grid` and `policy_targets`, Python can train/export a tiny hybrid model, and Rust can blend that model into action ordering and leaf evaluation.
+- One local screening smoke run for the outer loop succeeded end to end and produced a real candidate artifact tree. The hybrid candidate itself was extremely slow and weak, which is expected at this stage and should be treated as plumbing validation, not as a viable submission result.
 - A clean rerun of the first apparently winning `tmy4/topp4/cmy5/copp5` finalist family did not hold up on authoritative confirmation. The `lat38`, `lat40`, and `lat42` variants all passed Java smoke and easily beat the weak anchor, but all three still lost to the current incumbent on `heldout_v1`, so no promotion happened.
 - The next distinct `tmy6/topp8` finalist family did produce a real winner. `sweep_tmy6_topp8_cmy3_copp3_lat40` was accepted on authoritative rerun and promoted into `submission_current.json`.
 
@@ -103,6 +113,7 @@ Detailed follow-up docs:
 
 - Read [2026-03-11 Engine, Search, and Evaluation Harness](./2026-03-11-engine-search-and-eval.md) if you need to work on live strength or referee parity.
 - Read [2026-03-11 Training and Data Pipeline](./2026-03-11-training-and-data-pipeline.md) if you need to work on export, datasets, or model training.
+- Read [2026-03-12 Prose Outer Loop and Hybrid Lab](./2026-03-12-prose-outerloop-and-hybrid-lab.md) if you need to work on Prose orchestration, candidate artifacts, the hybrid branch, or Helios-facing contracts.
 - The immediate next operational step is to submit the promoted config, monitor live rank movement, and only then decide whether to run a narrower follow-up sweep or reopen self-play quality work.
 
 ## Notes

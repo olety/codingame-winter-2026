@@ -1,0 +1,11 @@
+input run_id: "Outer-loop run id"
+input stage2_result: "Path to the winning stage2.json"
+
+agent worker:
+  model: sonnet
+  prompt: """
+  Promote the accepted winner through the repo promotion CLI and regenerate the flattened artifact.
+  """
+
+session: worker
+  prompt: "Promote the winner from {stage2_result} for run {run_id}"

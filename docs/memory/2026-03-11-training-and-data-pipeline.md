@@ -16,6 +16,7 @@ Key behavior:
 - Java map dumps are still available, but only as an explicit oracle/debug mode.
 - Offline export now defaults to `extra_nodes_after_root` instead of wall-clock search.
 - Release binaries are used for self-play/export instead of debug builds.
+- Export rows now also carry `hybrid_grid` and `policy_targets` for the hybrid branch.
 
 ## Training row schema
 
@@ -45,6 +46,7 @@ This is meant to support:
 - dedup checks
 - later policy distillation
 - cleaner separation between build provenance and strategy identity
+- hybrid teacher-student training without inventing a second export path
 
 ## Training split and dedup
 
@@ -56,7 +58,37 @@ The Python training path now:
 
 This is a guard against the earlier leakage issue where validation rows duplicated training positions.
 
-## Results ledger
+## Hybrid training branch
+
+There is now a new hybrid path under `python/train/outerloop`:
+
+- `dataset.py`
+- `model.py`
+- `train_model.py`
+- `export_weights.py`
+
+Current behavior:
+
+- reads the new `hybrid_grid` + `policy_targets` schema
+- trains a tiny policy+value CNN
+- exports a small JSON weight bundle that Rust can consume directly
+
+The Rust side now has:
+
+- `rust/bot/src/hybrid.rs`
+
+That module loads the exported weights and can supply:
+
+- action-ordering priors
+- leaf-value bonus
+
+Current status:
+
+- local train/export/inference smoke passed
+- the first end-to-end screening candidate using this path was far too slow and weak
+- treat the hybrid path as new lab infrastructure, not as a promotable branch yet
+
+## Outer-loop artifacts and ledger
 
 `python/train/results.py` is still the local SQLite ledger, but its meaning is now stricter:
 
@@ -69,6 +101,19 @@ Wrapper scripts:
 - `python/train/run_local_experiment.py`
 - `python/train/run_arena.py`
 - `python/train/sweep_search.py`
+- `python/train/outerloop/run_candidate.py`
+
+The outer loop now writes candidate artifacts under:
+
+- `artifacts/outerloop/runs/<run_id>/manifest.json`
+- `artifacts/outerloop/runs/<run_id>/candidates/<candidate_id>/`
+
+The Helios-facing contract is:
+
+- one run manifest per run
+- one candidate directory per candidate
+- `genome.json` plus `stage*.json` files
+- stage result JSONs carry run/candidate linkage, hashes, executor, and timestamps
 
 ## Recent smoke runs
 
@@ -89,6 +134,7 @@ That exported `160` rows and completed an `mps` training smoke.
 ## Current caveats
 
 - Small smoke datasets can still produce tiny validation sets, so training metrics from those runs are only sanity checks.
-- The current network is still value-only and still uses the pooled 8-channel encoding.
-- The next meaningful ML step should come after stronger search/self-play targets, not before.
-- The sweep helper is now the preferred way to search the current Rust baseline; ML should stay behind that loop until a real promoted incumbent exists.
+- The current promoted submission is still search-only.
+- The new hybrid path uses identity-preserving features, but there is no single-file hybrid submission path yet.
+- The first meaningful hybrid milestone is “beats the incumbent locally without breaking timing,” not “promote immediately.”
+- The sweep helper is still the preferred way to search the current Rust baseline; hybrid work should stay behind the same authoritative gate.

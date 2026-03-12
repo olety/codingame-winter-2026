@@ -55,6 +55,16 @@ The current implementation intentionally does **not** include a transposition ta
 3. depth-2 top-k
 4. TT only if profiling shows it is worth the extra complexity
 
+The search path can now also consume an optional tiny hybrid model:
+
+- policy prior blending into action ordering
+- value blending into leaf evaluation
+
+Important guardrail:
+
+- the current live submission config still does **not** enable the hybrid branch
+- hybrid-guided search is local/arena/outer-loop capable, but not yet part of the promoted CodinGame submission path
+
 ## Arena harness
 
 There is now a release-mode Rust arena binary:
@@ -105,6 +115,11 @@ This artifact is intended for CodinGame paste submissions. It is compile-checked
 - any live bot or engine module used by the contest binary
 
 The compiled check binary at `submission/flattened_main` is local-only and ignored.
+
+Current limitation:
+
+- the flattened generator now fails explicitly for hybrid-enabled configs
+- that is intentional until one-file hybrid weight embedding is implemented
 
 ## Recent runtime checks
 

@@ -938,10 +938,36 @@ mod bot {
         }
 
         #[derive(Clone, Debug, PartialEq)]
+        pub struct HybridConfig {
+            pub weights_path: Option<String>,
+            pub prior_mix: f64,
+            pub leaf_mix: f64,
+            pub value_scale: f64,
+        }
+
+        impl Default for HybridConfig {
+            fn default() -> Self {
+                Self {
+                    weights_path: None,
+                    prior_mix: 0.0,
+                    leaf_mix: 0.0,
+                    value_scale: 48.0,
+                }
+            }
+        }
+
+        impl HybridConfig {
+            pub fn is_enabled(&self) -> bool {
+                self.weights_path.is_some() && (self.prior_mix != 0.0 || self.leaf_mix != 0.0)
+            }
+        }
+
+        #[derive(Clone, Debug, PartialEq)]
         pub struct BotConfig {
             pub name: String,
             pub eval: EvalWeights,
             pub search: SearchConfig,
+            pub hybrid: Option<HybridConfig>,
         }
 
         impl Default for BotConfig {
@@ -956,6 +982,7 @@ mod bot {
                     name: "submission_current".to_owned(),
                     eval: EvalWeights::default(),
                     search: SearchConfig::default(),
+                    hybrid: None,
                 }
             }
         }
@@ -1097,6 +1124,39 @@ mod bot {
                 .map(|coord| coord.manhattan_to(target))
                 .min()
                 .unwrap_or(99)
+        }
+    }
+    pub mod features {
+        // search-only flattened submission does not need training features
+    }
+    pub mod hybrid {
+        use super::config::{BotConfig, HybridConfig};
+        use crate::engine::{GameState, PlayerAction};
+
+        #[derive(Clone, Debug)]
+        pub struct HybridPrediction;
+
+        impl HybridPrediction {
+            pub fn action_prior(
+                &self,
+                _state: &GameState,
+                _owner: usize,
+                _action: &PlayerAction,
+            ) -> f64 {
+                0.0
+            }
+        }
+
+        pub fn predict(
+            _state: &GameState,
+            _owner: usize,
+            _config: &BotConfig,
+        ) -> Option<HybridPrediction> {
+            None
+        }
+
+        pub fn leaf_bonus(_prediction: &HybridPrediction, _hybrid: &HybridConfig) -> f64 {
+            0.0
         }
     }
     pub mod input {
@@ -1316,6 +1376,7 @@ mod bot {
 
         use super::config::BotConfig;
         use super::eval::evaluate;
+        use super::hybrid::{leaf_bonus, predict, HybridPrediction};
 
         const CONTEST_MAX_TURNS: i32 = 200;
 
@@ -1405,12 +1466,20 @@ mod bot {
             let my_action_count = my_actions.len();
             let opp_action_count = opp_actions.len();
             let default_action = PlayerAction::default();
+            let root_prediction = predict(state, owner, config);
 
             let mut my_order = (0..my_actions.len())
                 .map(|idx| {
                     (
                         idx,
-                        action_prior(state, owner, &my_actions[idx], &default_action, config),
+                        action_prior(
+                            state,
+                            owner,
+                            &my_actions[idx],
+                            &default_action,
+                            config,
+                            root_prediction.as_ref(),
+                        ),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -1420,7 +1489,14 @@ mod bot {
                 .map(|idx| {
                     (
                         idx,
-                        action_prior(state, owner, &default_action, &opp_actions[idx], config),
+                        action_prior(
+                            state,
+                            owner,
+                            &default_action,
+                            &opp_actions[idx],
+                            config,
+                            None,
+                        ),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -1589,12 +1665,20 @@ mod bot {
             let my_actions = ordered_joint_actions(state, owner);
             let opp_actions = ordered_joint_actions(state, 1 - owner);
             let default_action = PlayerAction::default();
+            let root_prediction = predict(state, owner, config);
 
             let mut my_order = (0..my_actions.len())
                 .map(|idx| {
                     (
                         idx,
-                        action_prior(state, owner, &my_actions[idx], &default_action, config),
+                        action_prior(
+                            state,
+                            owner,
+                            &my_actions[idx],
+                            &default_action,
+                            config,
+                            root_prediction.as_ref(),
+                        ),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -1604,7 +1688,14 @@ mod bot {
                 .map(|idx| {
                     (
                         idx,
-                        action_prior(state, owner, &default_action, &opp_actions[idx], config),
+                        action_prior(
+                            state,
+                            owner,
+                            &default_action,
+                            &opp_actions[idx],
+                            config,
+                            None,
+                        ),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -1635,7 +1726,7 @@ mod bot {
                         &my_actions[my_index],
                         &opp_actions[opp_index],
                     );
-                    let score = evaluate(&next, owner, CONTEST_MAX_TURNS, &config.eval);
+                    let score = evaluate_with_hybrid(&next, owner, config);
                     child_worst = child_worst.min(score);
                 }
                 if child_worst.is_finite() {
@@ -1646,7 +1737,7 @@ mod bot {
             if best_followup.is_finite() {
                 best_followup
             } else {
-                evaluate(state, owner, CONTEST_MAX_TURNS, &config.eval)
+                evaluate_with_hybrid(state, owner, config)
             }
         }
 
@@ -1678,9 +1769,16 @@ mod bot {
             my_action: &PlayerAction,
             opp_action: &PlayerAction,
             config: &BotConfig,
+            prediction: Option<&HybridPrediction>,
         ) -> f64 {
             let next = simulate_state(state, owner, my_action, opp_action);
-            evaluate(&next, owner, CONTEST_MAX_TURNS, &config.eval)
+            let mut score = evaluate_with_hybrid(&next, owner, config);
+            if let (Some(hybrid), Some(prediction)) = (config.hybrid.as_ref(), prediction) {
+                if hybrid.prior_mix != 0.0 {
+                    score += hybrid.prior_mix * prediction.action_prior(state, owner, my_action);
+                }
+            }
+            score
         }
 
         fn simulate_state(
@@ -1696,6 +1794,18 @@ mod bot {
                 next.step(opp_action, my_action);
             }
             next
+        }
+
+        fn evaluate_with_hybrid(state: &GameState, owner: usize, config: &BotConfig) -> f64 {
+            let mut score = evaluate(state, owner, CONTEST_MAX_TURNS, &config.eval);
+            if let Some(hybrid) = config.hybrid.as_ref() {
+                if hybrid.leaf_mix != 0.0 {
+                    if let Some(prediction) = predict(state, owner, config) {
+                        score += hybrid.leaf_mix * leaf_bonus(&prediction, hybrid);
+                    }
+                }
+            }
+            score
         }
 
         fn deadline_for_budget(started: Instant, budget: SearchBudget) -> Option<Instant> {

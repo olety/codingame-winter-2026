@@ -1,0 +1,12 @@
+input run_id: "Outer-loop run id"
+input genome_path: "Candidate genome path"
+
+agent worker:
+  model: sonnet
+  prompt: """
+  Run python -m python.train.outerloop.run_candidate for stage2 authoritative evaluation.
+  Respect the current incumbent/anchor/smoke gates.
+  """
+
+session: worker
+  prompt: "Run authoritative evaluation for {genome_path} in run {run_id}"

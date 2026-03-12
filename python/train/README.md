@@ -1,6 +1,6 @@
 # Local Training Scaffold
 
-This directory is the local, W&B-free training side of the Rust search/value pipeline.
+This directory is the local, W&B-free training side of the Rust search pipeline and the new Prose-first outer-loop lab.
 
 ## Expected dataset format
 
@@ -37,6 +37,7 @@ This directory is the local, W&B-free training side of the Rust search/value pip
 - `config_artifact_hash` tracks the exact file bytes used to build/export a run
 - `config_behavior_hash` tracks only `eval + search` semantics and is the strategy identity key
 - `chosen_action_id`, `joint_action_count`, and `root_values` are the compact search targets for later policy distillation
+- `hybrid_grid` and `policy_targets` are the new identity-preserving tensors/targets for the tiny hybrid branch
 
 ## Main entry points
 
@@ -45,6 +46,10 @@ This directory is the local, W&B-free training side of the Rust search/value pip
 - `python -m python.train.run_arena`
 - `python -m python.train.java_smoke`
 - `python -m python.train.sweep_search`
+- `python -m python.train.outerloop.run_candidate`
+- `python -m python.train.outerloop.train_model`
+- `python -m python.train.outerloop.export_weights`
+- `python -m python.train.outerloop.build_dataset`
 
 ## Optional Java oracle map dumps
 
@@ -92,6 +97,7 @@ Notes:
 - `--maps` remains available as an explicit oracle/debug input mode, but it is no longer the default hot path.
 - The exporter writes owner-relative samples for both players on each turn.
 - The current tensor shape is `8 x 23 x 42` with `6` scalar features.
+- Hybrid export additionally writes an identity-preserving `19 x 23 x 42` tensor plus per-bird policy targets.
 
 ## Parallel local pipeline
 
@@ -162,8 +168,55 @@ The default search grid is:
 - `deepen_child_my`, `deepen_child_opp` in `{3, 4, 5}`
 - `later_turn_ms` in `{38, 40, 42}`
 
+## Prose-first outer loop
+
+The repo now includes a filesystem-backed outer loop that is designed to be orchestrated by Prose:
+
+- `automation/outerloop/program.md`
+- `automation/outerloop/outerloop.prose`
+- `python/train/outerloop/*.py`
+
+Core runtime pieces:
+
+- `genome.py`: canonical candidate genome + semantic hash
+- `workspace.py`: isolated git worktrees with overlay of current local changes
+- `run_candidate.py`: stage-0, stage-1, stage-2 candidate runner
+- `train_model.py`: tiny hybrid policy+value trainer
+- `export_weights.py`: Rust-consumable weight export
+- `launch_modal.py` / `modal_job.py`: Modal executor hooks for training or larger data jobs
+- `promote.py`: authoritative promotion helper
+
+Candidate artifacts are written to:
+
+- `artifacts/outerloop/runs/<run_id>/manifest.json`
+- `artifacts/outerloop/runs/<run_id>/candidates/<candidate_id>/`
+
+Each candidate directory is expected to contain at least:
+
+- `genome.json`
+- `stage0.json`
+- `stage1.json`
+- `stage2.json` when authoritative evaluation runs
+
+Each stage result JSON now carries:
+
+- `run_id`
+- `candidate_id`
+- `candidate_dir`
+- `stage`
+- `status`
+- `artifact_hash`
+- `behavior_hash`
+- `genome_hash`
+- `executor`
+- `started_at`
+- `finished_at`
+
+These contracts are meant to be consumed directly by a Helios fork or any other external cockpit.
+
 ## Notes
 
 - PyTorch will prefer `mps` on Apple Silicon when available.
 - `results.sqlite` is the local experiment ledger.
 - Training-only runs are stored as `informational`. Arena plus Java smoke is the acceptance gate.
+- The current flattened CodinGame submission path is still search-only. Hybrid-enabled configs are trainable and evaluable locally, but are not yet embedded into the one-file submission artifact.

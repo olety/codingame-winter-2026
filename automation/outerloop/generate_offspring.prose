@@ -1,0 +1,12 @@
+input run_id: "Outer-loop run id"
+input base_genome_path: "Seed genome"
+
+agent planner:
+  model: opus
+  prompt: """
+  Generate semantically distinct offspring genomes.
+  Prefer breadth-heavy search exploration first, then hybrid candidates.
+  """
+
+session: planner
+  prompt: "Produce 4 offspring genomes for run {run_id} starting from {base_genome_path}"

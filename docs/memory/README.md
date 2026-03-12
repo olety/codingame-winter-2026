@@ -12,6 +12,8 @@ Start here for repo-local memory.
   - Self-play/export schema, sweep/training flow, grouped split rules, and experiment ledger behavior.
 - [2026-03-12 Live Results and Architecture Storyline](./2026-03-12-live-results-and-architecture-story.md)
   - Current architecture, current bot lineup, and rank/score history in a format meant to be reusable for future writeups or a blog post.
+- [2026-03-12 Prose Outer Loop and Hybrid Lab](./2026-03-12-prose-outerloop-and-hybrid-lab.md)
+  - Prose control plane, candidate artifact contracts, hybrid model path, Modal hooks, and current limitations of the single-file submission path.
 
 ## Usage
 

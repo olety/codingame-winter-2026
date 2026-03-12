@@ -1,0 +1,61 @@
+# Outer Loop Orchestrator
+
+input run_id: "Unique outer-loop run id"
+input genome_path: "Base genome to mutate or evaluate"
+input max_generations: "Maximum number of generations to try"
+
+agent planner:
+  model: opus
+  prompt: """
+  You are the outer-loop planner.
+  Generate compact candidate genomes, decide when to mutate or crossover,
+  and respect the outer-loop constitution in automation/outerloop/program.md.
+  """
+
+agent worker:
+  model: sonnet
+  prompt: """
+  You are the execution worker.
+  Run the repo CLIs exactly, write candidate artifacts, and never mutate sacred surfaces.
+  """
+
+agent evaluator:
+  model: sonnet
+  prompt: """
+  You are the evaluator.
+  Compare stage results, prefer fitness plus novelty, and only recommend promotion
+  when the authoritative stage-2 gate is satisfied.
+  """
+
+loop until **a candidate is promoted or max_generations is exhausted** (max: 20):
+  let offspring = session: planner
+    prompt: "Propose the next set of candidate genomes for run {run_id} using base {genome_path}"
+
+  parallel (on-fail: "continue"):
+    session: worker
+      prompt: "Run stage0+stage1 for the first proposed candidate"
+      context: offspring
+    session: worker
+      prompt: "Run stage0+stage1 for the second proposed candidate"
+      context: offspring
+    session: worker
+      prompt: "Run stage0+stage1 for the third proposed candidate"
+      context: offspring
+
+  let finalists = session: evaluator
+    prompt: "Select the strongest screening candidates and request authoritative evaluation"
+    context: offspring
+
+  parallel (on-fail: "continue"):
+    session: worker
+      prompt: "Run stage2 authoritative evaluation for each finalist"
+      context: finalists
+
+  let verdict = session: evaluator
+    prompt: "Pick the best stage2 result. If promotable, recommend promotion."
+    context: finalists
+
+  if **verdict recommends promotion**:
+    session: worker
+      prompt: "Promote the recommended winner and regenerate the flattened submission artifact"
+      context: verdict

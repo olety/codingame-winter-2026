@@ -47,6 +47,19 @@ def behavior_hash(path: Path) -> str:
         "eval": payload["eval"],
         "search": payload["search"],
     }
+    hybrid = payload.get("hybrid")
+    if hybrid is not None:
+        hybrid = dict(hybrid)
+        weights_path = hybrid.pop("weights_path", None)
+        if weights_path:
+            candidate = Path(weights_path)
+            if not candidate.is_absolute():
+                candidate = path.parent / candidate
+            if candidate.exists():
+                hybrid["weights"] = {"artifact_hash": artifact_hash(candidate)}
+            else:
+                hybrid["weights"] = {"path": weights_path}
+        canonical["hybrid"] = hybrid
     raw = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return stable_hash_bytes(raw)
 

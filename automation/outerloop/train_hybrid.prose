@@ -1,0 +1,12 @@
+input run_id: "Outer-loop run id"
+input genome_path: "Hybrid candidate genome path"
+
+agent worker:
+  model: sonnet
+  prompt: """
+  Run the hybrid training branch for this candidate.
+  Use Modal only if the genome requests it; otherwise stay local.
+  """
+
+session: worker
+  prompt: "Train the hybrid branch for candidate {genome_path} in run {run_id}"

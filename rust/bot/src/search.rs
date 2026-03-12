@@ -5,6 +5,7 @@ use snakebot_engine::{BirdCommand, Direction, GameState, PlayerAction};
 
 use crate::config::BotConfig;
 use crate::eval::evaluate;
+use crate::hybrid::{leaf_bonus, predict, HybridPrediction};
 
 const CONTEST_MAX_TURNS: i32 = 200;
 
@@ -94,12 +95,20 @@ pub fn choose_action(
     let my_action_count = my_actions.len();
     let opp_action_count = opp_actions.len();
     let default_action = PlayerAction::default();
+    let root_prediction = predict(state, owner, config);
 
     let mut my_order = (0..my_actions.len())
         .map(|idx| {
             (
                 idx,
-                action_prior(state, owner, &my_actions[idx], &default_action, config),
+                action_prior(
+                    state,
+                    owner,
+                    &my_actions[idx],
+                    &default_action,
+                    config,
+                    root_prediction.as_ref(),
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -109,7 +118,14 @@ pub fn choose_action(
         .map(|idx| {
             (
                 idx,
-                action_prior(state, owner, &default_action, &opp_actions[idx], config),
+                action_prior(
+                    state,
+                    owner,
+                    &default_action,
+                    &opp_actions[idx],
+                    config,
+                    None,
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -278,12 +294,20 @@ fn deepen_branch(
     let my_actions = ordered_joint_actions(state, owner);
     let opp_actions = ordered_joint_actions(state, 1 - owner);
     let default_action = PlayerAction::default();
+    let root_prediction = predict(state, owner, config);
 
     let mut my_order = (0..my_actions.len())
         .map(|idx| {
             (
                 idx,
-                action_prior(state, owner, &my_actions[idx], &default_action, config),
+                action_prior(
+                    state,
+                    owner,
+                    &my_actions[idx],
+                    &default_action,
+                    config,
+                    root_prediction.as_ref(),
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -293,7 +317,14 @@ fn deepen_branch(
         .map(|idx| {
             (
                 idx,
-                action_prior(state, owner, &default_action, &opp_actions[idx], config),
+                action_prior(
+                    state,
+                    owner,
+                    &default_action,
+                    &opp_actions[idx],
+                    config,
+                    None,
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -319,7 +350,7 @@ fn deepen_branch(
             *extra_nodes_remaining -= 1;
             stats.extra_nodes += 1;
             let next = simulate_state(state, owner, &my_actions[my_index], &opp_actions[opp_index]);
-            let score = evaluate(&next, owner, CONTEST_MAX_TURNS, &config.eval);
+            let score = evaluate_with_hybrid(&next, owner, config);
             child_worst = child_worst.min(score);
         }
         if child_worst.is_finite() {
@@ -330,7 +361,7 @@ fn deepen_branch(
     if best_followup.is_finite() {
         best_followup
     } else {
-        evaluate(state, owner, CONTEST_MAX_TURNS, &config.eval)
+        evaluate_with_hybrid(state, owner, config)
     }
 }
 
@@ -362,9 +393,16 @@ fn action_prior(
     my_action: &PlayerAction,
     opp_action: &PlayerAction,
     config: &BotConfig,
+    prediction: Option<&HybridPrediction>,
 ) -> f64 {
     let next = simulate_state(state, owner, my_action, opp_action);
-    evaluate(&next, owner, CONTEST_MAX_TURNS, &config.eval)
+    let mut score = evaluate_with_hybrid(&next, owner, config);
+    if let (Some(hybrid), Some(prediction)) = (config.hybrid.as_ref(), prediction) {
+        if hybrid.prior_mix != 0.0 {
+            score += hybrid.prior_mix * prediction.action_prior(state, owner, my_action);
+        }
+    }
+    score
 }
 
 fn simulate_state(
@@ -380,6 +418,18 @@ fn simulate_state(
         next.step(opp_action, my_action);
     }
     next
+}
+
+fn evaluate_with_hybrid(state: &GameState, owner: usize, config: &BotConfig) -> f64 {
+    let mut score = evaluate(state, owner, CONTEST_MAX_TURNS, &config.eval);
+    if let Some(hybrid) = config.hybrid.as_ref() {
+        if hybrid.leaf_mix != 0.0 {
+            if let Some(prediction) = predict(state, owner, config) {
+                score += hybrid.leaf_mix * leaf_bonus(&prediction, hybrid);
+            }
+        }
+    }
+    score
 }
 
 fn deadline_for_budget(started: Instant, budget: SearchBudget) -> Option<Instant> {

@@ -10,13 +10,16 @@ Current status:
 - Java-referee smoke canary that validates the built candidate artifact and behavior hashes
 - staged release-mode search sweep helper with smoke filtering and heldout/shadow finalist evaluation
 - deterministic self-play export and local Python value-training pipeline
+- Prose-first outer-loop scaffold for candidate generation, worktrees, screening, authoritative evaluation, and promotion
+- tiny hybrid policy+value branch with Rust-side prior/leaf integration and Python/Modal training/export workers
 - current promoted submission uses a breadth-heavier `6/8/3/3` search shape, while `incumbent_current.json` preserves the prior `6/6/4/4` baseline
 
 ## Repository layout
 
 - `rust/engine`: game state, rules, map generation, oracle loading, and Java parity tools
 - `rust/bot`: contest bot, search, evaluator, arena binary, and self-play export
-- `python/train`: local self-play orchestration, smoke/arena runners, value training, and results ledger
+- `python/train`: local self-play orchestration, smoke/arena runners, value training, outer-loop workers, and results ledger
+- `automation/outerloop`: Prose programs and research constitution for the outer loop
 - `src/test/java/com/codingame/game`: Java oracle and real referee runner helpers
 - `docs/memory`: repo-local status and handoff notes
 
@@ -69,6 +72,32 @@ python3 tools/generate_flattened_submission.py
 ```
 
 That emits [`submission/flattened_main.rs`](./submission/flattened_main.rs) from the live Rust bot and compile-checks it with `rustc`. Regenerate it whenever `submission_current.json` or the live bot/engine logic changes.
+
+Current limitation:
+
+- the flattened submission path is intentionally **search-only**
+- if a future promoted config enables the hybrid model, the generator currently fails explicitly until weight embedding for single-file submissions is implemented
+
+## Prose outer loop
+
+The repo now includes a Prose-first research lab scaffold:
+
+- [`automation/outerloop/program.md`](./automation/outerloop/program.md)
+- [`automation/outerloop/outerloop.prose`](./automation/outerloop/outerloop.prose)
+- [`python/train/outerloop`](./python/train/outerloop)
+
+The intended split is:
+
+- Prose owns orchestration
+- Python/Rust CLIs own deterministic work
+- Helios is an optional external cockpit/UI over `.prose/runs/...` and `artifacts/outerloop/...`
+
+Candidate artifacts live under:
+
+- `artifacts/outerloop/runs/<run_id>/manifest.json`
+- `artifacts/outerloop/runs/<run_id>/candidates/<candidate_id>/`
+
+Those artifacts are meant to be directly consumable by external tools like a Helios fork without inventing a second schema.
 
 ## Self-play and training
 

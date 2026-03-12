@@ -58,11 +58,46 @@ impl Default for SearchConfig {
     }
 }
 
+fn default_value_scale() -> f64 {
+    48.0
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HybridConfig {
+    #[serde(default)]
+    pub weights_path: Option<String>,
+    #[serde(default)]
+    pub prior_mix: f64,
+    #[serde(default)]
+    pub leaf_mix: f64,
+    #[serde(default = "default_value_scale")]
+    pub value_scale: f64,
+}
+
+impl Default for HybridConfig {
+    fn default() -> Self {
+        Self {
+            weights_path: None,
+            prior_mix: 0.0,
+            leaf_mix: 0.0,
+            value_scale: default_value_scale(),
+        }
+    }
+}
+
+impl HybridConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.weights_path.is_some() && (self.prior_mix != 0.0 || self.leaf_mix != 0.0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BotConfig {
     pub name: String,
     pub eval: EvalWeights,
     pub search: SearchConfig,
+    #[serde(default)]
+    pub hybrid: Option<HybridConfig>,
 }
 
 impl Default for BotConfig {
@@ -89,8 +124,11 @@ impl BotConfig {
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
+        let path = path.as_ref();
         let raw = fs::read_to_string(path)?;
-        Ok(serde_json::from_str(&raw)?)
+        let mut config: Self = serde_json::from_str(&raw)?;
+        resolve_hybrid_weights_path(&mut config, path);
+        Ok(config)
     }
 }
 
@@ -108,17 +146,69 @@ pub fn artifact_hash_file(path: impl AsRef<Path>) -> Result<String, Box<dyn std:
 }
 
 pub fn behavior_hash(config: &BotConfig) -> String {
-    let canonical = json!({
+    let mut canonical = json!({
         "eval": config.eval,
         "search": config.search,
     });
+    if let Some(hybrid) = config.hybrid.as_ref() {
+        canonical["hybrid"] = hybrid_behavior_value(hybrid, None);
+    }
     let bytes = canonical_json_bytes(&canonical);
     artifact_hash_bytes(&bytes)
 }
 
 pub fn behavior_hash_file(path: impl AsRef<Path>) -> Result<String, Box<dyn std::error::Error>> {
+    let path = path.as_ref();
     let config = BotConfig::load(path)?;
-    Ok(behavior_hash(&config))
+    let mut canonical = json!({
+        "eval": config.eval,
+        "search": config.search,
+    });
+    if let Some(hybrid) = config.hybrid.as_ref() {
+        canonical["hybrid"] = hybrid_behavior_value(hybrid, path.parent());
+    }
+    let bytes = canonical_json_bytes(&canonical);
+    Ok(artifact_hash_bytes(&bytes))
+}
+
+fn resolve_hybrid_weights_path(config: &mut BotConfig, config_path: &Path) {
+    let Some(hybrid) = config.hybrid.as_mut() else {
+        return;
+    };
+    let Some(weights_path) = hybrid.weights_path.as_mut() else {
+        return;
+    };
+    let path = Path::new(weights_path);
+    if path.is_absolute() {
+        return;
+    }
+    let base_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    *weights_path = base_dir.join(path).to_string_lossy().into_owned();
+}
+
+fn hybrid_behavior_value(hybrid: &HybridConfig, config_dir: Option<&Path>) -> Value {
+    let weights = hybrid.weights_path.as_ref().map(|raw| {
+        let path = config_dir
+            .map(|dir| dir.join(raw))
+            .filter(|resolved| resolved.exists())
+            .unwrap_or_else(|| Path::new(raw).to_path_buf());
+        if path.exists() {
+            json!({
+                "artifact_hash": artifact_hash_file(&path)
+                    .unwrap_or_else(|_| raw.to_owned()),
+            })
+        } else {
+            json!({
+                "path": raw,
+            })
+        }
+    });
+    json!({
+        "prior_mix": hybrid.prior_mix,
+        "leaf_mix": hybrid.leaf_mix,
+        "value_scale": hybrid.value_scale,
+        "weights": weights,
+    })
 }
 
 fn canonical_json_bytes(value: &Value) -> Vec<u8> {
