@@ -2,7 +2,9 @@
 package com.codingame.game;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -10,6 +12,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import com.codingame.event.Animation;
@@ -98,7 +101,8 @@ public class Game {
 
     private void initGrid(Random random) {
         GridMaker gridMaker = new GridMaker(random, gameManager.getLeagueLevel());
-        this.grid = gridMaker.make();
+        //        this.grid = gridMaker.make();
+        this.grid = gridMaker.makeFromImage();
     }
 
     public void resetGameTurnData() {
@@ -221,36 +225,52 @@ public class Game {
         return false;
     }
 
+    private boolean isGrounded(Coord c, Set<Bird> frozenBirds) {
+        // Check if a coordinate touches the ground or a frozen bird
+        Coord under = c.add(0, 1);
+        return hasTileOrAppleUnder(c) ||
+            frozenBirds.stream().anyMatch(b -> b.body.contains(under));
+    }
+
     private void doFalls() {
         boolean somethingFell = true;
         Map<Integer, Integer> fallDistances = new TreeMap<>();
+
         List<Bird> outOfBounds = new ArrayList<>();
+        Set<Bird> airborneBirds = new HashSet<>(getLiveBirds());
+        Set<Bird> groundedBirds = new HashSet<>();
 
         while (somethingFell) {
-            while (somethingFell) {
-                somethingFell = false;
+            somethingFell = false;
+            boolean somethingGotGrounded = true;
 
-                List<Bird> allBirds = getLiveBirds();
-
-                for (Bird bird : allBirds) {
-                    boolean canFall = bird.body.stream().noneMatch(c -> somethingSolidUnder(c, bird.body));
-                    if (canFall) {
-                        somethingFell = true;
-                        bird.body = new LinkedList<>(bird.body.stream().map(c -> c.add(0, 1)).toList());
-                        fallDistances.compute(bird.id, (k, v) -> v == null ? 1 : v + 1);
-
-                        // check out of bounds
-                        if (bird.body.stream().allMatch(part -> part.getY() >= grid.height + 1)) {
-                            bird.alive = false;
-                            outOfBounds.add(bird);
-                        }
+            while (somethingGotGrounded) {
+                somethingGotGrounded = false;
+                for (Bird bird : airborneBirds) {
+                    boolean isGrounded = bird.body.stream().anyMatch(c -> isGrounded(c, groundedBirds));
+                    if (isGrounded) {
+                        groundedBirds.add(bird);
+                        somethingGotGrounded = true;
                     }
+                }
+                airborneBirds.removeAll(groundedBirds);
+            }
+
+            for (Bird bird : airborneBirds) {
+
+                somethingFell = true;
+                bird.body = new LinkedList<>(bird.body.stream().map(c -> c.add(0, 1)).toList());
+                fallDistances.compute(bird.id, (k, v) -> v == null ? 1 : v + 1);
+
+                // check out of bounds
+                if (bird.body.stream().allMatch(part -> part.getY() >= grid.height + 1)) {
+                    bird.alive = false;
+                    outOfBounds.add(bird);
                 }
 
             }
-            // Handle intercoiled birds
-            somethingFell |= doIntercoiledFalls(fallDistances, outOfBounds);
 
+            airborneBirds.removeAll(outOfBounds);
         }
 
         for (Integer birdId : fallDistances.keySet()) {
