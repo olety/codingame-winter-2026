@@ -66,12 +66,15 @@ def strip_test_modules(source: str) -> str:
 
 def strip_serde(source: str) -> str:
     source = re.sub(r"^use serde::\{[^}]+\};\n", "", source, flags=re.MULTILINE)
+    source = re.sub(r"^use serde::\w+;\n", "", source, flags=re.MULTILINE)
     source = source.replace("Serialize, Deserialize, ", "")
     source = source.replace("Deserialize, Serialize, ", "")
     source = source.replace(", Serialize, Deserialize", "")
     source = source.replace(", Deserialize, Serialize", "")
     source = source.replace("Serialize, Deserialize", "")
     source = source.replace("Deserialize, Serialize", "")
+    source = source.replace(", Serialize", "")
+    source = source.replace("Serialize, ", "")
     return source
 
 
@@ -88,6 +91,51 @@ def rewrite_engine_module(name: str, source: str) -> str:
     return source.strip() + "\n"
 
 
+def strip_training_code(source: str) -> str:
+    """Remove training-only structs and functions from features.rs.
+
+    These reference types (OracleState, FinalResult, SearchStats, serde_json)
+    that are not available in the flattened submission.
+    """
+    # Remove TrainingRow struct (pub struct TrainingRow { ... })
+    for struct_name in ("TrainingRow", "TrainingMetadata"):
+        pattern = rf"(?:#\[derive\([^\)]*\)\]\n)?pub struct {struct_name} \{{[^}}]*\}}"
+        source = re.sub(pattern, "", source, flags=re.DOTALL)
+
+    # Remove encode_training_row function
+    for func_name in ("encode_training_row", "stable_hash"):
+        pattern = rf"pub fn {func_name}\b"
+        alt_pattern = rf"fn {func_name}\b"
+        for pat in (pattern, alt_pattern):
+            start = re.search(pat, source)
+            if start is None:
+                continue
+            fn_start = start.start()
+            brace_start = source.find("{", start.end())
+            if brace_start == -1:
+                continue
+            depth = 1
+            index = brace_start + 1
+            while depth > 0 and index < len(source):
+                char = source[index]
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                index += 1
+            if depth == 0:
+                while index < len(source) and source[index] in "\r\n":
+                    index += 1
+                source = source[:fn_start] + source[index:]
+
+    # Remove use crate::search::SearchStats (may already be rewritten to super::)
+    source = re.sub(r"^use super::search::SearchStats;\n", "", source, flags=re.MULTILINE)
+
+    # Clean up excessive blank lines
+    source = re.sub(r"\n{3,}", "\n\n", source)
+    return source
+
+
 def rewrite_bot_module(name: str, source: str) -> str:
     source = strip_serde(strip_test_modules(source))
     replacements = {
@@ -100,7 +148,7 @@ def rewrite_bot_module(name: str, source: str) -> str:
             "snakebot_engine::TileType::Wall": "TileType::Wall",
         },
         "features": {
-            "use snakebot_engine::{BirdCommand, Coord, Direction, FinalResult, GameState, OracleState, PlayerAction, TileType};": "use crate::engine::{BirdCommand, Coord, Direction, FinalResult, GameState, OracleState, PlayerAction, TileType};",
+            "use snakebot_engine::{BirdCommand, Coord, Direction, FinalResult, GameState, OracleState, PlayerAction, TileType};": "use crate::engine::{BirdCommand, Coord, Direction, GameState, PlayerAction, TileType};",
             "use crate::search::SearchStats;": "use super::search::SearchStats;",
         },
         "hybrid": {
@@ -124,7 +172,7 @@ def wrap_module(name: str, body: str) -> str:
     return f"pub mod {name} {{\n{textwrap.indent(body.rstrip(), '    ')}\n}}\n"
 
 
-def build_config_module(config_path: Path) -> str:
+def build_config_module(config_path: Path, *, embedded_hybrid: bool = False) -> str:
     payload = json.loads(load_text(config_path))
     eval_payload = payload["eval"]
     search_payload = payload["search"]
@@ -132,14 +180,24 @@ def build_config_module(config_path: Path) -> str:
     name_literal = json.dumps(payload["name"])
     hybrid_literal = "None"
     if hybrid_payload:
-        weights_path = json.dumps(hybrid_payload.get("weights_path"))
+        if embedded_hybrid:
+            weights_path_literal = 'Some("__embedded__".to_owned())'
+        else:
+            weights_path = json.dumps(hybrid_payload.get("weights_path"))
+            weights_path_literal = f"{weights_path}.map(str::to_owned)"
+        prior_depth = hybrid_payload.get("prior_depth_limit", "usize::MAX")
+        leaf_depth = hybrid_payload.get("leaf_depth_limit", "usize::MAX")
+        prior_depth_literal = "usize::MAX" if prior_depth == "usize::MAX" else str(prior_depth)
+        leaf_depth_literal = "usize::MAX" if leaf_depth == "usize::MAX" else str(leaf_depth)
         hybrid_literal = textwrap.dedent(
             f"""
             Some(HybridConfig {{
-                weights_path: {weights_path}.map(str::to_owned),
+                weights_path: {weights_path_literal},
                 prior_mix: {hybrid_payload.get("prior_mix", 0.0)},
                 leaf_mix: {hybrid_payload.get("leaf_mix", 0.0)},
                 value_scale: {hybrid_payload.get("value_scale", 48.0)},
+                prior_depth_limit: {prior_depth_literal},
+                leaf_depth_limit: {leaf_depth_literal},
             }})
             """
         ).strip()
@@ -203,6 +261,8 @@ def build_config_module(config_path: Path) -> str:
             pub prior_mix: f64,
             pub leaf_mix: f64,
             pub value_scale: f64,
+            pub prior_depth_limit: usize,
+            pub leaf_depth_limit: usize,
         }}
 
         impl Default for HybridConfig {{
@@ -212,6 +272,8 @@ def build_config_module(config_path: Path) -> str:
                     prior_mix: 0.0,
                     leaf_mix: 0.0,
                     value_scale: 48.0,
+                    prior_depth_limit: usize::MAX,
+                    leaf_depth_limit: usize::MAX,
                 }}
             }}
         }}
@@ -278,6 +340,275 @@ def build_disabled_hybrid_module() -> str:
         }
         """
     ).strip() + "\n"
+
+
+def _format_float_array(values: list[float], name: str) -> str:
+    """Format a list of floats as a Rust static const array."""
+    items = ", ".join(f"{v:.8e}" for v in values)
+    return f"static {name}: [f32; {len(values)}] = [{items}];"
+
+
+def _build_conv_layer_statics(prefix: str, layer: dict) -> tuple[str, str]:
+    """Return (static declarations, constructor expression) for a ConvLayer."""
+    w_name = f"{prefix}_W"
+    b_name = f"{prefix}_B"
+    statics = "\n".join([
+        _format_float_array(layer["weights"], w_name),
+        _format_float_array(layer["bias"], b_name),
+    ])
+    constructor = textwrap.dedent(f"""
+        ConvLayer {{
+            out_channels: {layer['out_channels']},
+            in_channels: {layer['in_channels']},
+            kernel_size: {layer['kernel_size']},
+            weights: &{w_name},
+            bias: &{b_name},
+        }}
+    """).strip()
+    return statics, constructor
+
+
+def _build_linear_layer_statics(prefix: str, layer: dict) -> tuple[str, str]:
+    """Return (static declarations, constructor expression) for a LinearLayer."""
+    w_name = f"{prefix}_W"
+    b_name = f"{prefix}_B"
+    statics = "\n".join([
+        _format_float_array(layer["weights"], w_name),
+        _format_float_array(layer["bias"], b_name),
+    ])
+    constructor = textwrap.dedent(f"""
+        LinearLayer {{
+            out_features: {layer['out_features']},
+            in_features: {layer['in_features']},
+            weights: &{w_name},
+            bias: &{b_name},
+        }}
+    """).strip()
+    return statics, constructor
+
+
+def build_embedded_hybrid_module(weights_path: Path) -> str:
+    """Build a hybrid module with neural network weights embedded as static arrays."""
+    raw = weights_path.read_text(encoding="utf-8")
+    model = json.loads(raw)
+
+    # Collect all static arrays
+    all_statics: list[str] = []
+    constructors: dict[str, str] = {}
+
+    for layer_name in ("conv1", "conv2"):
+        s, c = _build_conv_layer_statics(layer_name.upper(), model[layer_name])
+        all_statics.append(s)
+        constructors[layer_name] = c
+
+    has_conv3 = model.get("conv3") is not None
+    if has_conv3:
+        s, c = _build_conv_layer_statics("CONV3", model["conv3"])
+        all_statics.append(s)
+        constructors["conv3"] = c
+
+    for layer_name in ("policy", "value"):
+        s, c = _build_linear_layer_statics(layer_name.upper(), model[layer_name])
+        all_statics.append(s)
+        constructors[layer_name] = c
+
+    conv3_field = f"conv3: Some({constructors['conv3']})," if has_conv3 else "conv3: None,"
+
+    statics_block = "\n\n".join(all_statics)
+
+    return textwrap.dedent(f"""
+        use std::sync::OnceLock;
+
+        use crate::engine::{{GameState, PlayerAction}};
+        use super::config::{{BotConfig, HybridConfig}};
+        use super::features::{{encode_hybrid_position, policy_targets_for_action, HYBRID_GRID_CHANNELS, POLICY_ACTIONS_PER_BIRD, SCALAR_FEATURES}};
+
+        #[derive(Clone, Debug)]
+        pub struct HybridPrediction {{
+            pub policy_logits: Vec<f32>,
+            pub value: f32,
+        }}
+
+        impl HybridPrediction {{
+            pub fn action_prior(&self, state: &GameState, owner: usize, action: &PlayerAction) -> f64 {{
+                let targets = policy_targets_for_action(state, owner, action);
+                let mut total = 0.0_f64;
+                for (slot_idx, target) in targets.into_iter().enumerate() {{
+                    if target < 0 {{
+                        continue;
+                    }}
+                    let index = slot_idx * POLICY_ACTIONS_PER_BIRD + target as usize;
+                    if let Some(logit) = self.policy_logits.get(index) {{
+                        total += f64::from(*logit);
+                    }}
+                }}
+                total
+            }}
+        }}
+
+        struct ConvLayer {{
+            out_channels: usize,
+            in_channels: usize,
+            kernel_size: usize,
+            weights: &'static [f32],
+            bias: &'static [f32],
+        }}
+
+        struct LinearLayer {{
+            out_features: usize,
+            in_features: usize,
+            weights: &'static [f32],
+            bias: &'static [f32],
+        }}
+
+        struct TinyHybridWeights {{
+            input_channels: usize,
+            scalar_features: usize,
+            conv1: ConvLayer,
+            conv2: ConvLayer,
+            conv3: Option<ConvLayer>,
+            policy: LinearLayer,
+            value: LinearLayer,
+        }}
+
+        {statics_block}
+
+        fn get_embedded_model() -> &'static TinyHybridWeights {{
+            static MODEL: OnceLock<TinyHybridWeights> = OnceLock::new();
+            MODEL.get_or_init(|| TinyHybridWeights {{
+                input_channels: {model['input_channels']},
+                scalar_features: {model['scalar_features']},
+                conv1: {constructors['conv1']},
+                conv2: {constructors['conv2']},
+                {conv3_field}
+                policy: {constructors['policy']},
+                value: {constructors['value']},
+            }})
+        }}
+
+        pub fn predict(state: &GameState, owner: usize, config: &BotConfig) -> Option<HybridPrediction> {{
+            let hybrid = config.hybrid.as_ref()?;
+            if !hybrid.is_enabled() {{
+                return None;
+            }}
+            let model = get_embedded_model();
+            let encoded = encode_hybrid_position(state, owner);
+            if encoded.grid.len() != model.input_channels || encoded.scalars.len() != model.scalar_features {{
+                return None;
+            }}
+            Some(model.forward(&encoded.grid, &encoded.scalars))
+        }}
+
+        pub fn leaf_bonus(prediction: &HybridPrediction, hybrid: &HybridConfig) -> f64 {{
+            f64::from(prediction.value) * hybrid.value_scale
+        }}
+
+        impl TinyHybridWeights {{
+            fn forward(&self, grid: &[Vec<Vec<f32>>], scalars: &[f32]) -> HybridPrediction {{
+                let height = grid.first().map(|channel| channel.len()).unwrap_or(0);
+                let width = grid
+                    .first()
+                    .and_then(|channel| channel.first())
+                    .map(|row| row.len())
+                    .unwrap_or(0);
+                let mut flat_input = Vec::with_capacity(grid.len() * height * width);
+                for channel in grid {{
+                    for row in channel {{
+                        flat_input.extend_from_slice(row);
+                    }}
+                }}
+                let conv1_out = self.conv1.forward_flat(&flat_input, height, width);
+                let conv2_out = self.conv2.forward_flat(&conv1_out, height, width);
+                let (last_out, last_channels) = match self.conv3 {{
+                    Some(ref conv3) => (conv3.forward_flat(&conv2_out, height, width), conv3.out_channels),
+                    None => (conv2_out, self.conv2.out_channels),
+                }};
+                let pooled = global_average_pool_flat(&last_out, last_channels, height, width);
+                let mut features = pooled;
+                features.extend_from_slice(scalars);
+                let policy_logits = self.policy.forward(&features);
+                let value = self
+                    .value
+                    .forward(&features)
+                    .first()
+                    .copied()
+                    .unwrap_or_default()
+                    .tanh();
+                HybridPrediction {{
+                    policy_logits,
+                    value,
+                }}
+            }}
+        }}
+
+        impl ConvLayer {{
+            fn forward_flat(
+                &self,
+                input: &[f32],
+                height: usize,
+                width: usize,
+            ) -> Vec<f32> {{
+                let hw = height * width;
+                let mut output = vec![0.0_f32; self.out_channels * hw];
+                let pad = (self.kernel_size / 2) as isize;
+                for oc in 0..self.out_channels {{
+                    for y in 0..height {{
+                        for x in 0..width {{
+                            let mut acc = self.bias[oc];
+                            for ic in 0..self.in_channels {{
+                                for ky in 0..self.kernel_size {{
+                                    for kx in 0..self.kernel_size {{
+                                        let iy = y as isize + ky as isize - pad;
+                                        let ix = x as isize + kx as isize - pad;
+                                        if iy < 0
+                                            || ix < 0
+                                            || iy >= height as isize
+                                            || ix >= width as isize
+                                        {{
+                                            continue;
+                                        }}
+                                        let w_idx = ((oc * self.in_channels + ic) * self.kernel_size + ky)
+                                            * self.kernel_size
+                                            + kx;
+                                        acc += input[ic * hw + iy as usize * width + ix as usize]
+                                            * self.weights[w_idx];
+                                    }}
+                                }}
+                            }}
+                            output[oc * hw + y * width + x] = acc.max(0.0);
+                        }}
+                    }}
+                }}
+                output
+            }}
+        }}
+
+        impl LinearLayer {{
+            fn forward(&self, input: &[f32]) -> Vec<f32> {{
+                let mut output = vec![0.0_f32; self.out_features];
+                for (out_index, slot) in output.iter_mut().enumerate() {{
+                    let mut acc = self.bias[out_index];
+                    let base = out_index * self.in_features;
+                    for in_index in 0..self.in_features {{
+                        acc += input[in_index] * self.weights[base + in_index];
+                    }}
+                    *slot = acc;
+                }}
+                output
+            }}
+        }}
+
+        fn global_average_pool_flat(input: &[f32], channels: usize, height: usize, width: usize) -> Vec<f32> {{
+            let hw = height * width;
+            let norm = hw.max(1) as f32;
+            (0..channels)
+                .map(|c| {{
+                    let start = c * hw;
+                    input[start..start + hw].iter().sum::<f32>() / norm
+                }})
+                .collect()
+        }}
+    """).strip() + "\n"
 
 
 def build_main_module() -> str:
@@ -426,14 +757,20 @@ def main() -> None:
     input_mod = rewrite_bot_module("input", load_text(bot_dir / "input.rs"))
     eval_mod = rewrite_bot_module("eval", load_text(bot_dir / "eval.rs"))
     if hybrid_enabled:
-        raise SystemExit(
-            "flattened single-file generation does not yet support hybrid-enabled configs; "
-            "promote a search-only config or extend the generator to embed weights first"
+        weights_rel = config_payload["hybrid"]["weights_path"]
+        weights_path = Path(weights_rel)
+        if not weights_path.is_absolute():
+            weights_path = config_path.parent / weights_path
+        weights_path = weights_path.resolve()
+        features_mod = strip_training_code(
+            rewrite_bot_module("features", load_text(bot_dir / "features.rs"))
         )
-    features_mod = build_minimal_features_module()
-    hybrid_mod = build_disabled_hybrid_module()
+        hybrid_mod = build_embedded_hybrid_module(weights_path)
+    else:
+        features_mod = build_minimal_features_module()
+        hybrid_mod = build_disabled_hybrid_module()
     search_mod = rewrite_bot_module("search", load_text(bot_dir / "search.rs"))
-    config_mod = build_config_module(config_path)
+    config_mod = build_config_module(config_path, embedded_hybrid=hybrid_enabled)
     main_mod = build_main_module()
 
     rendered = "\n".join(

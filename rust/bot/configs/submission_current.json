@@ -1,5 +1,5 @@
 {
-  "name": "submission_current",
+  "name": "hybrid-value-mid-12ch-distill01",
   "eval": {
     "body": 120.0,
     "loss": 18.0,
@@ -18,5 +18,13 @@
     "deepen_child_my": 3,
     "deepen_child_opp": 3,
     "extra_nodes_after_root": 5000
+  },
+  "hybrid": {
+    "weights_path": "../weights/distill_c2_12ch_3L.json",
+    "prior_mix": 0.0,
+    "leaf_mix": 0.08,
+    "value_scale": 48.0,
+    "prior_depth_limit": 0,
+    "leaf_depth_limit": 0
   }
 }
