@@ -196,35 +196,144 @@ impl ConvLayer {
     ) -> Vec<f32> {
         let hw = height * width;
         let mut output = vec![0.0_f32; self.out_channels * hw];
-        let pad = (self.kernel_size / 2) as isize;
-        for oc in 0..self.out_channels {
-            for y in 0..height {
-                for x in 0..width {
-                    let mut acc = self.bias[oc];
+
+        if self.kernel_size == 1 {
+            // Pointwise: no padding needed
+            for oc in 0..self.out_channels {
+                let out_base = oc * hw;
+                let bias_val = self.bias[oc];
+                for i in 0..hw {
+                    let mut acc = bias_val;
                     for ic in 0..self.in_channels {
-                        for ky in 0..self.kernel_size {
-                            for kx in 0..self.kernel_size {
-                                let iy = y as isize + ky as isize - pad;
-                                let ix = x as isize + kx as isize - pad;
-                                if iy < 0
-                                    || ix < 0
-                                    || iy >= height as isize
-                                    || ix >= width as isize
-                                {
-                                    continue;
+                        acc += input[ic * hw + i] * self.weights[oc * self.in_channels + ic];
+                    }
+                    output[out_base + i] = acc.max(0.0);
+                }
+            }
+        } else if self.kernel_size == 3 {
+            // Initialize output with bias
+            for oc in 0..self.out_channels {
+                let bias_val = self.bias[oc];
+                let out_base = oc * hw;
+                for i in 0..hw {
+                    output[out_base + i] = bias_val;
+                }
+            }
+
+            // Loop reorder: oc -> ic -> spatial for contiguous input access
+            for oc in 0..self.out_channels {
+                let out_base = oc * hw;
+                for ic in 0..self.in_channels {
+                    let in_base = ic * hw;
+                    let w_base = (oc * self.in_channels + ic) * 9;
+                    let w = &self.weights[w_base..w_base + 9];
+
+                    // Interior cells: no bounds checks, manually unrolled 3x3
+                    for y in 1..height - 1 {
+                        let row_off = y * width;
+                        for x in 1..width - 1 {
+                            let out_idx = out_base + row_off + x;
+                            let mut acc = 0.0_f32;
+                            // Row y-1
+                            acc += input[in_base + (y - 1) * width + (x - 1)] * w[0];
+                            acc += input[in_base + (y - 1) * width + x] * w[1];
+                            acc += input[in_base + (y - 1) * width + (x + 1)] * w[2];
+                            // Row y
+                            acc += input[in_base + y * width + (x - 1)] * w[3];
+                            acc += input[in_base + y * width + x] * w[4];
+                            acc += input[in_base + y * width + (x + 1)] * w[5];
+                            // Row y+1
+                            acc += input[in_base + (y + 1) * width + (x - 1)] * w[6];
+                            acc += input[in_base + (y + 1) * width + x] * w[7];
+                            acc += input[in_base + (y + 1) * width + (x + 1)] * w[8];
+                            output[out_idx] += acc;
+                        }
+                    }
+
+                    // Edge cells: top/bottom rows, left/right columns (bounds-checked)
+                    // Top row (y=0) and bottom row (y=height-1)
+                    for y in [0, height - 1] {
+                        for x in 0..width {
+                            let out_idx = out_base + y * width + x;
+                            for ky in 0..3usize {
+                                for kx in 0..3usize {
+                                    let iy = y as isize + ky as isize - 1;
+                                    let ix = x as isize + kx as isize - 1;
+                                    if iy >= 0
+                                        && ix >= 0
+                                        && iy < height as isize
+                                        && ix < width as isize
+                                    {
+                                        output[out_idx] += input
+                                            [in_base + iy as usize * width + ix as usize]
+                                            * w[ky * 3 + kx];
+                                    }
                                 }
-                                let w_idx = ((oc * self.in_channels + ic) * self.kernel_size + ky)
-                                    * self.kernel_size
-                                    + kx;
-                                acc += input[ic * hw + iy as usize * width + ix as usize]
-                                    * self.weights[w_idx];
                             }
                         }
                     }
-                    output[oc * hw + y * width + x] = acc.max(0.0);
+                    // Left column (x=0) and right column (x=width-1), excluding corners
+                    for y in 1..height - 1 {
+                        for x in [0, width - 1] {
+                            let out_idx = out_base + y * width + x;
+                            for ky in 0..3usize {
+                                for kx in 0..3usize {
+                                    let iy = y as isize + ky as isize - 1;
+                                    let ix = x as isize + kx as isize - 1;
+                                    if iy >= 0
+                                        && ix >= 0
+                                        && iy < height as isize
+                                        && ix < width as isize
+                                    {
+                                        output[out_idx] += input
+                                            [in_base + iy as usize * width + ix as usize]
+                                            * w[ky * 3 + kx];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Apply ReLU
+            for v in output.iter_mut() {
+                *v = v.max(0.0);
+            }
+        } else {
+            // Generic fallback for other kernel sizes
+            let pad = (self.kernel_size / 2) as isize;
+            for oc in 0..self.out_channels {
+                for y in 0..height {
+                    for x in 0..width {
+                        let mut acc = self.bias[oc];
+                        for ic in 0..self.in_channels {
+                            for ky in 0..self.kernel_size {
+                                for kx in 0..self.kernel_size {
+                                    let iy = y as isize + ky as isize - pad;
+                                    let ix = x as isize + kx as isize - pad;
+                                    if iy < 0
+                                        || ix < 0
+                                        || iy >= height as isize
+                                        || ix >= width as isize
+                                    {
+                                        continue;
+                                    }
+                                    let w_idx =
+                                        ((oc * self.in_channels + ic) * self.kernel_size + ky)
+                                            * self.kernel_size
+                                            + kx;
+                                    acc += input[ic * hw + iy as usize * width + ix as usize]
+                                        * self.weights[w_idx];
+                                }
+                            }
+                        }
+                        output[oc * hw + y * width + x] = acc.max(0.0);
+                    }
                 }
             }
         }
+
         output
     }
 }
