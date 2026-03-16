@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import time
 from pathlib import Path
@@ -321,10 +322,12 @@ def train_teacher_from_spec(spec: dict) -> dict:
             f"lr={scheduler.get_last_lr()[0]:.6f}",
             flush=True,
         )
-        # Per-epoch validation + checkpoint to Volume
+        # Per-epoch validation + checkpoint
         if checkpoint_interval > 0 and (epoch + 1) % checkpoint_interval == 0:
             run_id = spec.get("run_id", "default")
-            ckpt_dir = Path(f"/data/{run_id}/teacher/checkpoints")
+            # Use /data/ (Modal Volume) if available, else output_dir
+            base = Path("/data") if Path("/data").exists() and os.access("/data", os.W_OK) else Path(spec["output_dir"])
+            ckpt_dir = base / run_id / "teacher" / "checkpoints"
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             ckpt_path = ckpt_dir / f"teacher_epoch{epoch+1}.pt"
             torch.save(model.state_dict(), ckpt_path)
