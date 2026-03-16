@@ -301,6 +301,16 @@ def train_teacher_from_spec(spec: dict) -> dict:
             epoch_vloss += train_value_loss
             epoch_ploss += train_policy_loss
             n_batches += 1
+            if n_batches % 1000 == 0:
+                elapsed = time.time() - epoch_start
+                batches_left = len(train_loader) - n_batches
+                eta = elapsed / n_batches * batches_left
+                print(
+                    f"[teacher] Epoch {epoch+1} batch {n_batches}/{len(train_loader)} "
+                    f"({elapsed:.0f}s, ETA {eta:.0f}s) "
+                    f"vloss={epoch_vloss/n_batches:.4f} ploss={epoch_ploss/n_batches:.4f}",
+                    flush=True,
+                )
         scheduler.step()
         epoch_elapsed = time.time() - epoch_start
         total_elapsed = time.time() - started

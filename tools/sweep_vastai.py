@@ -136,6 +136,7 @@ def search_offers(gpu_name: str, max_price: float, count: int) -> list[dict]:
         f"gpu_name={gpu_name} "
         f"num_gpus=1 "
         f"dph<={max_price} "
+        f"gpu_ram>=76 "
         f"disk_space>=100 "
         f"inet_down>=200 "
         f"reliability>0.95 "
