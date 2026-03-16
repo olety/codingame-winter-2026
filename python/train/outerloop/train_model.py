@@ -375,7 +375,7 @@ def train_teacher_from_spec(spec: dict) -> dict:
     metrics = {
         "mode": "teacher",
         "device": str(device),
-        "samples": len(dataset.rows),
+        "samples": len(dataset),
         "train_samples": len(train_indices),
         "valid_samples": len(valid_indices),
         "epochs": epochs,
