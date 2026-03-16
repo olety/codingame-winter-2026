@@ -29,6 +29,9 @@ IGNORED_TOP_LEVEL = {
     ".git",
     ".prose",
     ".serena",
+    ".wrangler",
+    "artifacts",
+    "data",
     "submission",
     "target",
     "worktrees",
@@ -59,7 +62,7 @@ image = (
         "mvn -version",
         "java -version",
     )
-    .pip_install("torch")
+    .pip_install("numpy", "torch", "git+https://github.com/KellerJordan/Muon")
     .add_local_dir(
         str(REPO_ROOT),
         remote_path=str(REMOTE_REPO),
@@ -70,6 +73,12 @@ image = (
 
 app = modal.App("snakebot-outerloop")
 vol = modal.Volume.from_name("snakebot-datasets", create_if_missing=True)
+r2_mount = modal.CloudBucketMount(
+    "snakebot-data",
+    bucket_endpoint_url="https://70ae12731f3e503777d9f59a6c2c18da.r2.cloudflarestorage.com",
+    secret=modal.Secret.from_name("r2-creds"),
+    read_only=True,
+)
 
 
 def _repo_env() -> dict[str, str]:
@@ -103,11 +112,8 @@ def _train_impl(spec_json: str) -> dict:
         if "volume_dataset_path" in spec:
             # Prefer reading dataset from shared Volume (avoids base64 serialisation).
             vol.reload()
-            vol_src = Path(spec.pop("volume_dataset_path"))
-            dataset_path = tmpdir_path / "dataset.jsonl"
-            dataset_path.write_bytes(vol_src.read_bytes())
+            spec["dataset_path"] = spec.pop("volume_dataset_path")
             spec.pop("dataset_jsonl_gz_b64", None)
-            spec["dataset_path"] = str(dataset_path)
         elif "dataset_jsonl_gz_b64" in spec:
             dataset_path = tmpdir_path / "dataset.jsonl"
             dataset_path.write_bytes(
@@ -355,16 +361,17 @@ def train_l40s(spec_json: str) -> dict:
 #     return _train_impl(spec_json)
 #
 #
-# @app.function(
-#     image=image,
-#     gpu="A100",
-#     cpu=6.0,
-#     memory=49152,
-#     timeout=60 * 60,
-#     max_containers=8,
-# )
-# def train_a100(spec_json: str) -> dict:
-#     return _train_impl(spec_json)
+@app.function(
+    image=image,
+    gpu="A100",
+    cpu=6.0,
+    memory=49152,
+    timeout=60 * 60,
+    max_containers=8,
+    volumes={"/data": vol},
+)
+def train_a100(spec_json: str) -> dict:
+    return _train_impl(spec_json)
 
 
 @app.function(
@@ -400,13 +407,12 @@ def _train_teacher_impl(spec_json: str) -> dict:
         tmpdir_path = Path(tmpdir)
         output_dir = tmpdir_path / "teacher"
         spec["output_dir"] = str(output_dir)
-        # Resolve dataset from Volume or fallback
-        if "volume_dataset_path" in spec:
+        # Resolve dataset: R2 bitpacked > Volume > fallback
+        if "r2_bitpacked_path" in spec:
+            spec["dataset_path"] = spec.pop("r2_bitpacked_path")
+        elif "volume_dataset_path" in spec:
             vol.reload()
-            vol_src = Path(spec.pop("volume_dataset_path"))
-            dataset_path = tmpdir_path / "dataset.jsonl"
-            dataset_path.write_bytes(vol_src.read_bytes())
-            spec["dataset_path"] = str(dataset_path)
+            spec["dataset_path"] = spec.pop("volume_dataset_path")
         else:
             spec["dataset_path"] = _repo_relative_remote(spec["dataset_path"])
 
@@ -489,6 +495,33 @@ def train_teacher_l40s(spec_json: str) -> dict:
 
 @app.function(
     image=image,
+    gpu="A100",
+    cpu=6.0,
+    memory=196608,
+    timeout=24 * 60 * 60,
+    max_containers=4,
+    volumes={"/data": vol},
+)
+def train_teacher_a100(spec_json: str) -> dict:
+    return _train_teacher_impl(spec_json)
+
+
+@app.function(
+    image=image,
+    gpu="H100",
+    cpu=8.0,
+    memory=196608,
+    timeout=24 * 60 * 60,
+    max_containers=4,
+    volumes={"/data": vol},
+    cloud_bucket_mounts={"/r2": r2_mount},
+)
+def train_teacher_h100(spec_json: str) -> dict:
+    return _train_teacher_impl(spec_json)
+
+
+@app.function(
+    image=image,
     gpu="L40S",
     cpu=4.0,
     memory=32768,
@@ -497,6 +530,19 @@ def train_teacher_l40s(spec_json: str) -> dict:
     volumes={"/data": vol},
 )
 def generate_soft_targets_l40s(spec_json: str) -> dict:
+    return _generate_soft_targets_impl(spec_json)
+
+
+@app.function(
+    image=image,
+    gpu="A100",
+    cpu=6.0,
+    memory=49152,
+    timeout=60 * 60,
+    max_containers=4,
+    volumes={"/data": vol},
+)
+def generate_soft_targets_a100(spec_json: str) -> dict:
     return _generate_soft_targets_impl(spec_json)
 
 
@@ -515,17 +561,8 @@ def _train_function_for_gpu(gpu_name: str) -> Callable[[str], dict]:
     normalized = gpu_name.strip().upper()
     if normalized in {"L40S", "L40"}:
         return train_l40s
-    # Non-destructive note:
-    # Other GPU tiers are intentionally disabled for now. Restore the commented
-    # branches above if we later want to reopen H100/H200/B200/A100 experiments.
-    # if normalized == "H100":
-    #     return train_h100
-    # if normalized == "H200":
-    #     return train_h200
-    # if normalized == "B200":
-    #     return train_b200
-    # if normalized == "A100":
-    #     return train_a100
+    if normalized == "A100":
+        return train_a100
     raise ValueError(f"unsupported modal gpu type: {gpu_name}")
 
 
@@ -543,9 +580,19 @@ def main(task: str, spec_json: str) -> str:
         result = run_arena_screen.remote(spec_json)
         return json.dumps(result, indent=2, sort_keys=True)
     if task == "train-teacher":
-        result = train_teacher_l40s.remote(spec_json)
+        gpu_name = str(spec.get("gpu", "L40S")).strip().upper()
+        if gpu_name == "H100":
+            result = train_teacher_h100.remote(spec_json)
+        elif gpu_name == "A100":
+            result = train_teacher_a100.remote(spec_json)
+        else:
+            result = train_teacher_l40s.remote(spec_json)
         return json.dumps(result, indent=2, sort_keys=True)
     if task == "generate-soft-targets":
-        result = generate_soft_targets_l40s.remote(spec_json)
+        gpu_name = str(spec.get("gpu", "L40S")).strip().upper()
+        if gpu_name == "A100":
+            result = generate_soft_targets_a100.remote(spec_json)
+        else:
+            result = generate_soft_targets_l40s.remote(spec_json)
         return json.dumps(result, indent=2, sort_keys=True)
     raise ValueError(f"unsupported modal task: {task}")

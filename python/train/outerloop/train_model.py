@@ -11,8 +11,39 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 
-from python.train.outerloop.dataset import HybridDistillDataset, HybridSelfPlayDataset, dedup_rows, grouped_split_indices
+from python.train.outerloop.dataset import BitpackedDataset, HybridDistillDataset, HybridSelfPlayDataset, dedup_dataset, dedup_rows, grouped_split_indices, grouped_split_indices_bitpacked
 from python.train.outerloop.model import TeacherHybridNet, TinyHybridNet
+
+
+def _make_optimizer(model: nn.Module, spec: dict) -> torch.optim.Optimizer:
+    name = spec.get("optimizer", "adamw")
+    if name == "muon":
+        from muon import SingleDeviceMuonWithAuxAdam
+        # Muon handles hidden 2D+ weight matrices; biases, gains, 1D params use AdamW.
+        muon_params = [p for p in model.parameters() if p.ndim >= 2]
+        other_params = [p for p in model.parameters() if p.ndim < 2]
+        param_groups = [
+            dict(
+                params=muon_params,
+                lr=float(spec.get("learning_rate", 0.02)),
+                momentum=float(spec.get("muon_momentum", 0.95)),
+                weight_decay=float(spec.get("weight_decay", 1e-4)),
+                use_muon=True,
+            ),
+            dict(
+                params=other_params,
+                lr=float(spec.get("adamw_lr", 3e-4)),
+                betas=(0.9, 0.95),
+                weight_decay=float(spec.get("weight_decay", 1e-4)),
+                use_muon=False,
+            ),
+        ]
+        return SingleDeviceMuonWithAuxAdam(param_groups)
+    return torch.optim.AdamW(
+        model.parameters(),
+        lr=float(spec.get("learning_rate", 1e-3)),
+        weight_decay=float(spec.get("weight_decay", 1e-4)),
+    )
 
 
 def select_device(preference: str) -> torch.device:
@@ -106,11 +137,7 @@ def train_from_spec(spec: dict) -> dict:
         conv_channels=int(spec.get("conv_channels", 8)),
         num_conv_layers=int(spec.get("num_conv_layers", 2)),
     ).to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(spec.get("learning_rate", 1e-3)),
-        weight_decay=float(spec.get("weight_decay", 1e-4)),
-    )
+    optimizer = _make_optimizer(model, spec)
     value_loss_fn = nn.SmoothL1Loss(reduction="none")
     policy_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
@@ -180,58 +207,145 @@ def train_teacher_from_spec(spec: dict) -> dict:
     device = select_device(str(spec.get("device_preference", "cuda")))
     started = time.time()
 
-    dataset = HybridSelfPlayDataset(spec["dataset_path"], max_samples=int(spec.get("max_samples", 0)))
-    dataset.rows = dedup_rows(dataset.rows)
-    train_indices, valid_indices = grouped_split_indices(
-        dataset.rows, float(spec.get("train_split", 0.9)), seed,
-    )
+    print(f"[teacher] Loading dataset from {spec['dataset_path']}...", flush=True)
+    load_start = time.time()
+    dataset_path = Path(spec["dataset_path"])
+    use_bitpacked = dataset_path.is_dir() and (dataset_path / "header.json").exists()
+    if use_bitpacked:
+        dataset = BitpackedDataset(dataset_path)
+        print(f"[teacher] Bitpacked dataset: {len(dataset):,} rows in {time.time()-load_start:.0f}s (memory-mapped)", flush=True)
+        train_indices, valid_indices = grouped_split_indices_bitpacked(
+            dataset._seeds, dataset._game_id_hashes,
+            float(spec.get("train_split", 0.9)), seed,
+        )
+    else:
+        dataset = HybridSelfPlayDataset(spec["dataset_path"], max_samples=int(spec.get("max_samples", 0)))
+        print(f"[teacher] Loaded {len(dataset.rows)} rows in {time.time()-load_start:.0f}s, deduplicating...", flush=True)
+        dedup_dataset(dataset)
+        print(f"[teacher] {len(dataset.rows)} unique rows", flush=True)
+        train_indices, valid_indices = grouped_split_indices(
+            dataset.rows, float(spec.get("train_split", 0.9)), seed,
+        )
     batch_size = int(spec.get("batch_size", 256))
-    train_loader = DataLoader(Subset(dataset, train_indices), batch_size=batch_size, shuffle=True)
-    valid_loader = DataLoader(Subset(dataset, valid_indices), batch_size=batch_size, shuffle=False)
+    use_cuda = device.type == "cuda"
+    num_workers = int(spec.get("num_workers", 4 if use_bitpacked else 0))
+    train_loader = DataLoader(Subset(dataset, train_indices), batch_size=batch_size, shuffle=True, pin_memory=use_cuda, num_workers=num_workers)
+    valid_loader = DataLoader(Subset(dataset, valid_indices), batch_size=batch_size, shuffle=False, pin_memory=use_cuda, num_workers=num_workers)
 
     sample = dataset[0]
     grid_shape = sample["grid"].shape
     scalars_shape = sample["scalars"].shape
+    channels = int(spec.get("teacher_conv_channels", 128))
+    blocks = int(spec.get("teacher_num_res_blocks", 8))
     model = TeacherHybridNet(
         input_channels=int(grid_shape[0]),
         scalar_features=int(scalars_shape[0]),
-        conv_channels=int(spec.get("teacher_conv_channels", 128)),
-        num_res_blocks=int(spec.get("teacher_num_res_blocks", 8)),
+        conv_channels=channels,
+        num_res_blocks=blocks,
     ).to(device)
+    param_count = sum(p.numel() for p in model.parameters())
+    print(f"[teacher] Model: {channels}ch/{blocks}blocks, {param_count/1e6:.1f}M params, grid={grid_shape}", flush=True)
+
+    # Resume from checkpoint if specified
+    resume_ckpt = spec.get("resume_checkpoint")
+    if resume_ckpt:
+        ckpt_path = Path(resume_ckpt)
+        print(f"[teacher] Resuming from checkpoint: {ckpt_path}", flush=True)
+        state_dict = torch.load(ckpt_path, map_location=device, weights_only=True)
+        model.load_state_dict(state_dict)
+        print(f"[teacher] Checkpoint loaded successfully", flush=True)
 
     epochs = int(spec.get("epochs", 20))
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(spec.get("learning_rate", 3e-4)),
-        weight_decay=float(spec.get("weight_decay", 1e-4)),
-    )
+    optimizer = _make_optimizer(model, spec)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     value_loss_fn = nn.SmoothL1Loss(reduction="none")
     policy_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
+    # bf16 autocast — no GradScaler needed for bfloat16
+    use_amp = bool(spec.get("use_amp", True)) and device.type == "cuda"
+    amp_dtype = torch.bfloat16
+
     train_value_loss = 0.0
     train_policy_loss = 0.0
+    checkpoint_interval = int(spec.get("checkpoint_interval", 1))
+    print(
+        f"[teacher] Starting training: {epochs} epochs, {len(train_loader)} batches/epoch, "
+        f"device={device}, amp={'bf16' if use_amp else 'off'}",
+        flush=True,
+    )
     for epoch in range(epochs):
         model.train()
+        epoch_start = time.time()
+        epoch_vloss = 0.0
+        epoch_ploss = 0.0
+        n_batches = 0
         for batch in train_loader:
             grid = batch["grid"].to(device)
             scalars = batch["scalars"].to(device)
             target = batch["value"].to(device)
             weight = batch["weight"].to(device)
             policy_targets = batch["policy_targets"].to(device)
-            policy_logits, pred = model(grid, scalars)
-            value_loss = (value_loss_fn(pred, target) * weight).mean()
-            policy_loss = policy_loss_fn(
-                policy_logits.view(-1, policy_logits.shape[-1]),
-                policy_targets.view(-1),
-            )
-            loss = value_loss + policy_loss
+            with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                policy_logits, pred = model(grid, scalars)
+                value_loss = (value_loss_fn(pred, target) * weight).mean()
+                policy_loss = policy_loss_fn(
+                    policy_logits.view(-1, policy_logits.shape[-1]),
+                    policy_targets.view(-1),
+                )
+                loss = value_loss + policy_loss
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
             train_value_loss = value_loss.item()
             train_policy_loss = policy_loss.item()
+            epoch_vloss += train_value_loss
+            epoch_ploss += train_policy_loss
+            n_batches += 1
         scheduler.step()
+        epoch_elapsed = time.time() - epoch_start
+        total_elapsed = time.time() - started
+        print(
+            f"[teacher] Epoch {epoch+1}/{epochs} done in {epoch_elapsed:.0f}s "
+            f"(total {total_elapsed/60:.1f}min) — "
+            f"vloss={epoch_vloss/max(n_batches,1):.4f} ploss={epoch_ploss/max(n_batches,1):.4f} "
+            f"lr={scheduler.get_last_lr()[0]:.6f}",
+            flush=True,
+        )
+        # Per-epoch validation + checkpoint to Volume
+        if checkpoint_interval > 0 and (epoch + 1) % checkpoint_interval == 0:
+            run_id = spec.get("run_id", "default")
+            ckpt_dir = Path(f"/data/{run_id}/teacher/checkpoints")
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_path = ckpt_dir / f"teacher_epoch{epoch+1}.pt"
+            torch.save(model.state_dict(), ckpt_path)
+            # Quick validation every checkpoint
+            val_metrics = evaluate(model, valid_loader, device)
+            epoch_log = {
+                "epoch": epoch + 1,
+                "train_vloss": epoch_vloss / max(n_batches, 1),
+                "train_ploss": epoch_ploss / max(n_batches, 1),
+                "val_mae": val_metrics["value_mae"],
+                "val_corr": val_metrics["value_correlation"],
+                "val_policy_acc": val_metrics["policy_accuracy"],
+                "epoch_seconds": epoch_elapsed,
+                "total_minutes": total_elapsed / 60.0,
+                "lr": scheduler.get_last_lr()[0],
+            }
+            log_path = ckpt_dir.parent / "epoch_logs.jsonl"
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(epoch_log) + "\n")
+            try:
+                from python.train.outerloop.modal_job import vol
+                vol.commit()
+                print(
+                    f"[teacher] Checkpoint epoch {epoch+1}: "
+                    f"val_mae={val_metrics['value_mae']:.4f} "
+                    f"val_corr={val_metrics['value_correlation']:.4f} "
+                    f"val_pacc={val_metrics['policy_accuracy']:.4f}",
+                    flush=True,
+                )
+            except Exception:
+                print(f"[teacher] Checkpoint saved locally: {ckpt_path}", flush=True)
 
     validation = evaluate(model, valid_loader, device)
     output_dir = Path(spec["output_dir"])
@@ -344,11 +458,7 @@ def train_distill_from_spec(spec: dict) -> dict:
     T = float(spec.get("distill_temperature", 3.0))
     alpha = float(spec.get("distill_alpha", 0.5))
     epochs = int(spec.get("epochs", 4))
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(spec.get("learning_rate", 1e-3)),
-        weight_decay=float(spec.get("weight_decay", 1e-4)),
-    )
+    optimizer = _make_optimizer(model, spec)
     hard_policy_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
     train_total_loss = 0.0
