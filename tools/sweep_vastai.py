@@ -60,7 +60,7 @@ def _build_onstart(config: dict, sweep_id: str, r2_access: str, r2_secret: str) 
         exec > >(tee /workspace/training.log) 2>&1
 
         echo "[sweep:{name}] Setting up..."
-        pip install -q numpy awscli
+        pip install -q numpy "git+https://github.com/KellerJordan/Muon" awscli
 
         aws configure set aws_access_key_id {r2_access}
         aws configure set aws_secret_access_key {r2_secret}
