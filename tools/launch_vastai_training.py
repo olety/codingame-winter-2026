@@ -79,7 +79,7 @@ def create_instance(offer_id: int, disk_gb: int, onstart_script: str) -> int:
     """Create a vast.ai SSH instance and return instance ID."""
     result = run([
         "vastai", "create", "instance", str(offer_id),
-        "--image", "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel",
+        "--image", "pytorch/pytorch:2.10.0-cuda12.6-cudnn9-devel",
         "--disk", str(disk_gb),
         "--ssh",
         "--direct",

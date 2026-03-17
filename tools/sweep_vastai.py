@@ -60,7 +60,8 @@ def _build_onstart(config: dict, sweep_id: str, r2_access: str, r2_secret: str) 
         exec > >(tee /workspace/training.log) 2>&1
 
         echo "[sweep:{name}] Setting up..."
-        pip install -q numpy "git+https://github.com/KellerJordan/Muon" awscli
+        pip install -q numpy awscli
+        pip install -q "git+https://github.com/KellerJordan/Muon" || true  # fallback if native Muon fails on conv weights
 
         aws configure set aws_access_key_id {r2_access}
         aws configure set aws_secret_access_key {r2_secret}
@@ -174,7 +175,7 @@ def create_instance(offer_id: int, onstart: str, disk: int = 120) -> int | None:
     """Create instance, return ID."""
     result = subprocess.run(
         ["vastai", "create", "instance", str(offer_id),
-         "--image", "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel",
+         "--image", "pytorch/pytorch:2.10.0-cuda12.6-cudnn9-devel",
          "--disk", str(disk),
          "--ssh", "--direct",
          "--onstart-cmd", onstart],
