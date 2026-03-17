@@ -19,15 +19,17 @@ from python.train.outerloop.model import TeacherHybridNet, TinyHybridNet
 def _make_optimizer(model: nn.Module, spec: dict) -> torch.optim.Optimizer:
     name = spec.get("optimizer", "adamw")
     if name == "muon":
-        # Try native torch.optim.Muon (PyTorch 2.9+), fall back to custom
         lr = float(spec.get("learning_rate", 0.02))
         momentum = float(spec.get("muon_momentum", 0.95))
         wd = float(spec.get("weight_decay", 1e-4))
-        if hasattr(torch.optim, "Muon"):
+        # Native torch.optim.Muon (2.9+) only supports 2D params — use for MLPs only
+        has_conv = any(p.ndim > 2 for p in model.parameters())
+        if hasattr(torch.optim, "Muon") and not has_conv:
             return torch.optim.Muon(
                 model.parameters(), lr=lr, momentum=momentum,
                 weight_decay=wd, nesterov=True,
             )
+        # Custom Muon handles conv weights via internal reshaping
         from muon import SingleDeviceMuonWithAuxAdam
         muon_params = [p for p in model.parameters() if p.ndim >= 2]
         other_params = [p for p in model.parameters() if p.ndim < 2]
@@ -252,9 +254,10 @@ def train_teacher_from_spec(spec: dict) -> dict:
         num_res_blocks=blocks,
     ).to(device)
 
-    # channels_last (NHWC) for faster conv2d on Tensor Cores
-    if device.type == "cuda":
-        model = model.to(memory_format=torch.channels_last)
+    # NOTE: channels_last disabled — conflicts with Muon optimizer's .view() calls
+    # on conv weights. Re-enable after forking Muon to use .reshape().
+    # if device.type == "cuda":
+    #     model = model.to(memory_format=torch.channels_last)
 
     param_count = sum(p.numel() for p in model.parameters())
     print(f"[teacher] Model: {channels}ch/{blocks}blocks, {param_count/1e6:.1f}M params, grid={grid_shape}", flush=True)
@@ -300,8 +303,10 @@ def train_teacher_from_spec(spec: dict) -> dict:
     use_compile = bool(spec.get("use_compile", True)) and device.type == "cuda"
     if use_compile:
         try:
-            model = torch.compile(model, mode="max-autotune")
-            print("[teacher] torch.compile enabled (max-autotune)", flush=True)
+            # backward_pass_autocast="off" because backward runs outside autocast
+            with torch._functorch.config.patch(backward_pass_autocast="off"):
+                model = torch.compile(model, mode="max-autotune", dynamic=False)
+            print("[teacher] torch.compile enabled (max-autotune, dynamic=False)", flush=True)
         except Exception as e:
             print(f"[teacher] torch.compile failed, continuing without: {e}", flush=True)
     checkpoint_interval = int(spec.get("checkpoint_interval", 1))
@@ -319,7 +324,7 @@ def train_teacher_from_spec(spec: dict) -> dict:
         epoch_ploss = torch.tensor(0.0, device=device)
         n_batches = 0
         for batch in train_loader:
-            grid = batch["grid"].to(device, memory_format=torch.channels_last, non_blocking=True)
+            grid = batch["grid"].to(device, non_blocking=True)
             scalars = batch["scalars"].to(device, non_blocking=True)
             target = batch["value"].to(device, non_blocking=True)
             weight = batch["weight"].to(device, non_blocking=True)
@@ -425,8 +430,8 @@ def train_teacher_from_spec(spec: dict) -> dict:
         "train_samples": len(train_indices),
         "valid_samples": len(valid_indices),
         "epochs": epochs,
-        "train_value_loss": train_value_loss,
-        "train_policy_loss": train_policy_loss,
+        "train_value_loss": (epoch_vloss / max(n_batches, 1)).item(),
+        "train_policy_loss": (epoch_ploss / max(n_batches, 1)).item(),
         "validation_value_mae": validation["value_mae"],
         "validation_value_correlation": validation["value_correlation"],
         "validation_policy_accuracy": validation["policy_accuracy"],
