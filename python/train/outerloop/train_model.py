@@ -249,16 +249,34 @@ def train_teacher_from_spec(spec: dict) -> dict:
 
     # Resume from checkpoint if specified
     resume_ckpt = spec.get("resume_checkpoint")
+    start_epoch = 0
+    continue_training = bool(spec.get("continue_training", False))
     if resume_ckpt:
         ckpt_path = Path(resume_ckpt)
         print(f"[teacher] Resuming from checkpoint: {ckpt_path}", flush=True)
-        state_dict = torch.load(ckpt_path, map_location=device, weights_only=True)
-        model.load_state_dict(state_dict)
-        print(f"[teacher] Checkpoint loaded successfully", flush=True)
+        ckpt_data = torch.load(ckpt_path, map_location=device, weights_only=False)
+        # Support both old (bare state_dict) and new (full checkpoint) formats
+        if isinstance(ckpt_data, dict) and "model_state_dict" in ckpt_data:
+            model.load_state_dict(ckpt_data["model_state_dict"])
+            print(f"[teacher] Checkpoint loaded (epoch {ckpt_data.get('epoch', '?')})", flush=True)
+        else:
+            model.load_state_dict(ckpt_data)
+            ckpt_data = None  # old format, no optimizer/scheduler state
+            print(f"[teacher] Checkpoint loaded (legacy format)", flush=True)
 
     epochs = int(spec.get("epochs", 20))
     optimizer = _make_optimizer(model, spec)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    # Continued pre-training: load optimizer state, reset LR schedule (warm restart)
+    if resume_ckpt and continue_training and ckpt_data is not None:
+        if "optimizer_state_dict" in ckpt_data:
+            optimizer.load_state_dict(ckpt_data["optimizer_state_dict"])
+            print(f"[teacher] Optimizer state restored for continued training", flush=True)
+        start_epoch = ckpt_data.get("epoch", 0)
+        # Reset scheduler for warm restart (fresh cosine over new epochs)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+        print(f"[teacher] Warm restart: {epochs} new epochs from epoch {start_epoch}", flush=True)
     value_loss_fn = nn.SmoothL1Loss(reduction="none")
     policy_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
@@ -271,10 +289,12 @@ def train_teacher_from_spec(spec: dict) -> dict:
     checkpoint_interval = int(spec.get("checkpoint_interval", 1))
     print(
         f"[teacher] Starting training: {epochs} epochs, {len(train_loader)} batches/epoch, "
-        f"device={device}, amp={'bf16' if use_amp else 'off'}",
+        f"device={device}, amp={'bf16' if use_amp else 'off'}"
+        + (f", continued from epoch {start_epoch}" if start_epoch > 0 else ""),
         flush=True,
     )
-    for epoch in range(epochs):
+    total_epochs = start_epoch + epochs
+    for epoch in range(start_epoch, total_epochs):
         model.train()
         epoch_start = time.time()
         epoch_vloss = 0.0
@@ -316,7 +336,7 @@ def train_teacher_from_spec(spec: dict) -> dict:
         epoch_elapsed = time.time() - epoch_start
         total_elapsed = time.time() - started
         print(
-            f"[teacher] Epoch {epoch+1}/{epochs} done in {epoch_elapsed:.0f}s "
+            f"[teacher] Epoch {epoch+1}/{total_epochs} done in {epoch_elapsed:.0f}s "
             f"(total {total_elapsed/60:.1f}min) — "
             f"vloss={epoch_vloss/max(n_batches,1):.4f} ploss={epoch_ploss/max(n_batches,1):.4f} "
             f"lr={scheduler.get_last_lr()[0]:.6f}",
@@ -330,7 +350,11 @@ def train_teacher_from_spec(spec: dict) -> dict:
             ckpt_dir = base / run_id / "teacher" / "checkpoints"
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             ckpt_path = ckpt_dir / f"teacher_epoch{epoch+1}.pt"
-            torch.save(model.state_dict(), ckpt_path)
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "epoch": epoch + 1,
+            }, ckpt_path)
             # Quick validation every checkpoint
             val_metrics = evaluate(model, valid_loader, device)
             epoch_log = {

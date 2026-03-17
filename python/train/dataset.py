@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from glob import glob
 from pathlib import Path
@@ -27,12 +28,20 @@ class SelfPlayDataset(Dataset[dict[str, torch.Tensor]]):
 
         self.rows: list[dict] = []
         for dataset_path in self.paths:
-            with dataset_path.open("r", encoding="utf-8") as handle:
+            if dataset_path.suffix == ".gz":
+                handle = gzip.open(dataset_path, "rt", encoding="utf-8")
+            else:
+                handle = dataset_path.open("r", encoding="utf-8")
+            with handle:
                 for line in handle:
                     line = line.strip()
                     if not line:
                         continue
-                    self.rows.append(json.loads(line))
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    self.rows.append(row)
                     if max_samples and len(self.rows) >= max_samples:
                         break
             if max_samples and len(self.rows) >= max_samples:
@@ -60,7 +69,7 @@ def resolve_dataset_paths(path: str | Path) -> list[Path]:
     if any(token in raw for token in "*?["):
         return sorted(Path(match) for match in glob(raw))
     if dataset_path.is_dir():
-        return sorted(dataset_path.glob("*.jsonl"))
+        return sorted(list(dataset_path.glob("*.jsonl")) + list(dataset_path.glob("*.jsonl.gz")))
     if dataset_path.exists():
         return [dataset_path]
     raise FileNotFoundError(f"dataset not found: {dataset_path}")

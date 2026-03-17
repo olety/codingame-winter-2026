@@ -208,16 +208,17 @@ class _ShardWriter:
                     p.unlink()
 
 
-def _load_existing_hashes(output_dir: Path) -> tuple[set[int], list[dict], int]:
+def _load_existing_hashes(output_dir: Path) -> tuple[set[int], list[dict], int, set[str]]:
     """Load hashes from existing shards for append mode."""
     header_path = output_dir / "header.json"
     if not header_path.exists():
-        return set(), [], 0
+        return set(), [], 0, set()
 
     with open(header_path, "r") as f:
         header = json.load(f)
 
     shards = header.get("shards", [])
+    processed_files = set(header.get("processed_files", []))
     global_hashes: set[int] = set()
     total_rows = 0
 
@@ -235,7 +236,7 @@ def _load_existing_hashes(output_dir: Path) -> tuple[set[int], list[dict], int]:
             global_hashes.add(int(h))
         total_rows += n_rows
 
-    return global_hashes, shards, total_rows
+    return global_hashes, shards, total_rows, processed_files
 
 
 def main() -> None:
@@ -272,15 +273,21 @@ def main() -> None:
 
     # In append mode, load existing hashes and shard info
     if args.append:
-        global_hashes, existing_shards, existing_rows = _load_existing_hashes(args.output_dir)
+        global_hashes, existing_shards, existing_rows, processed_files = _load_existing_hashes(args.output_dir)
         start_shard = len(existing_shards)
+        # Skip files already processed in previous runs
+        before = len(input_files)
+        input_files = [f for f in input_files if f.name not in processed_files]
+        skipped_files = before - len(input_files)
         print(f"[pack] Append mode: {existing_rows:,} existing rows in {start_shard} shards, "
-              f"{len(global_hashes):,} known hashes")
+              f"{len(global_hashes):,} known hashes, "
+              f"{skipped_files:,} files already processed (skipped)")
     else:
         global_hashes = set()
         existing_shards = []
         existing_rows = 0
         start_shard = 0
+        processed_files = set()
 
     print(f"[pack] {len(input_files)} input files, {args.workers} workers, "
           f"{args.rows_per_shard:,} rows/shard")
@@ -340,6 +347,9 @@ def main() -> None:
     writer.close()
     elapsed = time.time() - started
 
+    # Track all processed files (existing + newly processed)
+    processed_files.update(f.name for f in input_files)
+
     # Build header
     all_shards = existing_shards + writer.shards
     total_rows = existing_rows + total_kept
@@ -353,6 +363,7 @@ def main() -> None:
         "grid_shape": [MAX_GRID_CHANNELS, MAX_GRID_HEIGHT, MAX_GRID_WIDTH],
         "num_scalars": 6,
         "shards": all_shards,
+        "processed_files": sorted(processed_files),
         "num_input_files": len(input_files),
         "total_skipped": total_skipped,
         "total_dupes": total_dupes,
