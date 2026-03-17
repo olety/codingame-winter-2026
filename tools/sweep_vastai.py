@@ -37,15 +37,13 @@ R2_BUCKET = "snakebot-data"
 
 # ── Sweep grid ──────────────────────────────────────────────────────────
 SWEEP_CONFIGS = [
-    # LR sweep (most important for Muon)
-    {"name": "lr0.005",  "learning_rate": 0.005, "batch_size": 512, "weight_decay": 1e-4, "policy_loss_weight": 1.0},
-    {"name": "lr0.01",   "learning_rate": 0.01,  "batch_size": 512, "weight_decay": 1e-4, "policy_loss_weight": 1.0},
-    {"name": "lr0.02",   "learning_rate": 0.02,  "batch_size": 512, "weight_decay": 1e-4, "policy_loss_weight": 1.0},  # baseline
-    {"name": "lr0.04",   "learning_rate": 0.04,  "batch_size": 512, "weight_decay": 1e-4, "policy_loss_weight": 1.0},
-    # Batch size sweep
-    {"name": "bs1024",   "learning_rate": 0.02,  "batch_size": 1024, "weight_decay": 1e-4, "policy_loss_weight": 1.0},
+    # LR sweep (most important for Muon) — 128ch/8-block teacher
+    {"name": "lr0.005",  "learning_rate": 0.005, "batch_size": 1024, "weight_decay": 1e-4, "policy_loss_weight": 1.0},
+    {"name": "lr0.01",   "learning_rate": 0.01,  "batch_size": 1024, "weight_decay": 1e-4, "policy_loss_weight": 1.0},
+    {"name": "lr0.02",   "learning_rate": 0.02,  "batch_size": 1024, "weight_decay": 1e-4, "policy_loss_weight": 1.0},  # baseline
+    {"name": "lr0.04",   "learning_rate": 0.04,  "batch_size": 1024, "weight_decay": 1e-4, "policy_loss_weight": 1.0},
     # Regularization sweep
-    {"name": "wd1e-3",   "learning_rate": 0.02,  "batch_size": 512, "weight_decay": 1e-3, "policy_loss_weight": 1.0},
+    {"name": "wd1e-3",   "learning_rate": 0.02,  "batch_size": 1024, "weight_decay": 1e-3, "policy_loss_weight": 1.0},
 ]
 
 
@@ -62,7 +60,7 @@ def _build_onstart(config: dict, sweep_id: str, r2_access: str, r2_secret: str) 
         exec > >(tee /workspace/training.log) 2>&1
 
         echo "[sweep:{name}] Setting up..."
-        pip install -q numpy "git+https://github.com/KellerJordan/Muon" awscli
+        pip install -q numpy awscli
 
         aws configure set aws_access_key_id {r2_access}
         aws configure set aws_secret_access_key {r2_secret}
@@ -82,15 +80,15 @@ def _build_onstart(config: dict, sweep_id: str, r2_access: str, r2_secret: str) 
             "dataset_path": "/workspace/bitpacked",
             "output_dir": "/workspace/output",
             "device_preference": "cuda",
-            "teacher_conv_channels": 512,
-            "teacher_num_res_blocks": 16,
+            "teacher_conv_channels": 128,
+            "teacher_num_res_blocks": 8,
             "epochs": 2,
             "batch_size": {config['batch_size']},
             "optimizer": "muon",
             "learning_rate": {config['learning_rate']},
             "weight_decay": {config['weight_decay']},
             {muon_args}
-            "num_workers": 4,
+            "num_workers": 8,
             "checkpoint_interval": 1,
             "run_id": "{sweep_id}_{name}",
             "seed": 42

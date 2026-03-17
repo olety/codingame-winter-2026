@@ -19,25 +19,23 @@ from python.train.outerloop.model import TeacherHybridNet, TinyHybridNet
 def _make_optimizer(model: nn.Module, spec: dict) -> torch.optim.Optimizer:
     name = spec.get("optimizer", "adamw")
     if name == "muon":
+        # Try native torch.optim.Muon (PyTorch 2.9+), fall back to custom
+        lr = float(spec.get("learning_rate", 0.02))
+        momentum = float(spec.get("muon_momentum", 0.95))
+        wd = float(spec.get("weight_decay", 1e-4))
+        if hasattr(torch.optim, "Muon"):
+            return torch.optim.Muon(
+                model.parameters(), lr=lr, momentum=momentum,
+                weight_decay=wd, nesterov=True,
+            )
         from muon import SingleDeviceMuonWithAuxAdam
-        # Muon handles hidden 2D+ weight matrices; biases, gains, 1D params use AdamW.
         muon_params = [p for p in model.parameters() if p.ndim >= 2]
         other_params = [p for p in model.parameters() if p.ndim < 2]
         param_groups = [
-            dict(
-                params=muon_params,
-                lr=float(spec.get("learning_rate", 0.02)),
-                momentum=float(spec.get("muon_momentum", 0.95)),
-                weight_decay=float(spec.get("weight_decay", 1e-4)),
-                use_muon=True,
-            ),
-            dict(
-                params=other_params,
-                lr=float(spec.get("adamw_lr", 3e-4)),
-                betas=(0.9, 0.95),
-                weight_decay=float(spec.get("weight_decay", 1e-4)),
-                use_muon=False,
-            ),
+            dict(params=muon_params, lr=lr, momentum=momentum,
+                 weight_decay=wd, use_muon=True),
+            dict(params=other_params, lr=float(spec.get("adamw_lr", 3e-4)),
+                 betas=(0.9, 0.95), weight_decay=wd, use_muon=False),
         ]
         return SingleDeviceMuonWithAuxAdam(param_groups)
     return torch.optim.AdamW(
@@ -229,21 +227,35 @@ def train_teacher_from_spec(spec: dict) -> dict:
         )
     batch_size = int(spec.get("batch_size", 256))
     use_cuda = device.type == "cuda"
-    num_workers = int(spec.get("num_workers", 4 if use_bitpacked else 0))
-    train_loader = DataLoader(Subset(dataset, train_indices), batch_size=batch_size, shuffle=True, pin_memory=use_cuda, num_workers=num_workers)
-    valid_loader = DataLoader(Subset(dataset, valid_indices), batch_size=batch_size, shuffle=False, pin_memory=use_cuda, num_workers=num_workers)
+    num_workers = int(spec.get("num_workers", 8 if use_bitpacked else 0))
+    loader_kwargs = dict(pin_memory=use_cuda, num_workers=num_workers)
+    if num_workers > 0:
+        loader_kwargs.update(persistent_workers=True, prefetch_factor=3)
+    train_loader = DataLoader(Subset(dataset, train_indices), batch_size=batch_size, shuffle=True, drop_last=True, **loader_kwargs)
+    valid_loader = DataLoader(Subset(dataset, valid_indices), batch_size=batch_size, shuffle=False, **loader_kwargs)
 
     sample = dataset[0]
     grid_shape = sample["grid"].shape
     scalars_shape = sample["scalars"].shape
     channels = int(spec.get("teacher_conv_channels", 128))
     blocks = int(spec.get("teacher_num_res_blocks", 8))
+
+    # CUDA performance flags
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")
+
     model = TeacherHybridNet(
         input_channels=int(grid_shape[0]),
         scalar_features=int(scalars_shape[0]),
         conv_channels=channels,
         num_res_blocks=blocks,
     ).to(device)
+
+    # channels_last (NHWC) for faster conv2d on Tensor Cores
+    if device.type == "cuda":
+        model = model.to(memory_format=torch.channels_last)
+
     param_count = sum(p.numel() for p in model.parameters())
     print(f"[teacher] Model: {channels}ch/{blocks}blocks, {param_count/1e6:.1f}M params, grid={grid_shape}", flush=True)
 
@@ -284,8 +296,14 @@ def train_teacher_from_spec(spec: dict) -> dict:
     use_amp = bool(spec.get("use_amp", True)) and device.type == "cuda"
     amp_dtype = torch.bfloat16
 
-    train_value_loss = 0.0
-    train_policy_loss = 0.0
+    # torch.compile for kernel fusion + Triton optimization
+    use_compile = bool(spec.get("use_compile", True)) and device.type == "cuda"
+    if use_compile:
+        try:
+            model = torch.compile(model, mode="max-autotune")
+            print("[teacher] torch.compile enabled (max-autotune)", flush=True)
+        except Exception as e:
+            print(f"[teacher] torch.compile failed, continuing without: {e}", flush=True)
     checkpoint_interval = int(spec.get("checkpoint_interval", 1))
     print(
         f"[teacher] Starting training: {epochs} epochs, {len(train_loader)} batches/epoch, "
@@ -297,15 +315,15 @@ def train_teacher_from_spec(spec: dict) -> dict:
     for epoch in range(start_epoch, total_epochs):
         model.train()
         epoch_start = time.time()
-        epoch_vloss = 0.0
-        epoch_ploss = 0.0
+        epoch_vloss = torch.tensor(0.0, device=device)
+        epoch_ploss = torch.tensor(0.0, device=device)
         n_batches = 0
         for batch in train_loader:
-            grid = batch["grid"].to(device)
-            scalars = batch["scalars"].to(device)
-            target = batch["value"].to(device)
-            weight = batch["weight"].to(device)
-            policy_targets = batch["policy_targets"].to(device)
+            grid = batch["grid"].to(device, memory_format=torch.channels_last, non_blocking=True)
+            scalars = batch["scalars"].to(device, non_blocking=True)
+            target = batch["value"].to(device, non_blocking=True)
+            weight = batch["weight"].to(device, non_blocking=True)
+            policy_targets = batch["policy_targets"].to(device, non_blocking=True)
             with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                 policy_logits, pred = model(grid, scalars)
                 value_loss = (value_loss_fn(pred, target) * weight).mean()
@@ -317,19 +335,20 @@ def train_teacher_from_spec(spec: dict) -> dict:
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
-            train_value_loss = value_loss.item()
-            train_policy_loss = policy_loss.item()
-            epoch_vloss += train_value_loss
-            epoch_ploss += train_policy_loss
+            # Accumulate on GPU to avoid per-batch sync
+            epoch_vloss += value_loss.detach()
+            epoch_ploss += policy_loss.detach()
             n_batches += 1
             if n_batches % 1000 == 0:
                 elapsed = time.time() - epoch_start
                 batches_left = len(train_loader) - n_batches
                 eta = elapsed / n_batches * batches_left
+                avg_vloss = (epoch_vloss / n_batches).item()
+                avg_ploss = (epoch_ploss / n_batches).item()
                 print(
                     f"[teacher] Epoch {epoch+1} batch {n_batches}/{len(train_loader)} "
                     f"({elapsed:.0f}s, ETA {eta:.0f}s) "
-                    f"vloss={epoch_vloss/n_batches:.4f} ploss={epoch_ploss/n_batches:.4f}",
+                    f"vloss={avg_vloss:.4f} ploss={avg_ploss:.4f}",
                     flush=True,
                 )
         scheduler.step()
@@ -338,7 +357,7 @@ def train_teacher_from_spec(spec: dict) -> dict:
         print(
             f"[teacher] Epoch {epoch+1}/{total_epochs} done in {epoch_elapsed:.0f}s "
             f"(total {total_elapsed/60:.1f}min) — "
-            f"vloss={epoch_vloss/max(n_batches,1):.4f} ploss={epoch_ploss/max(n_batches,1):.4f} "
+            f"vloss={(epoch_vloss/max(n_batches,1)).item():.4f} ploss={(epoch_ploss/max(n_batches,1)).item():.4f} "
             f"lr={scheduler.get_last_lr()[0]:.6f}",
             flush=True,
         )
@@ -359,8 +378,8 @@ def train_teacher_from_spec(spec: dict) -> dict:
             val_metrics = evaluate(model, valid_loader, device)
             epoch_log = {
                 "epoch": epoch + 1,
-                "train_vloss": epoch_vloss / max(n_batches, 1),
-                "train_ploss": epoch_ploss / max(n_batches, 1),
+                "train_vloss": (epoch_vloss / max(n_batches, 1)).item(),
+                "train_ploss": (epoch_ploss / max(n_batches, 1)).item(),
                 "val_mae": val_metrics["value_mae"],
                 "val_corr": val_metrics["value_correlation"],
                 "val_policy_acc": val_metrics["policy_accuracy"],
