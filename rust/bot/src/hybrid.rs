@@ -7,7 +7,7 @@ use serde::Deserialize;
 use snakebot_engine::{GameState, PlayerAction};
 
 use crate::config::{BotConfig, HybridConfig};
-use crate::features::{encode_hybrid_position, policy_targets_for_action, HYBRID_GRID_CHANNELS, POLICY_ACTIONS_PER_BIRD, SCALAR_FEATURES};
+use crate::features::{encode_hybrid_position, policy_targets_for_action, HYBRID_GRID_CHANNELS, MAX_BOARD_HEIGHT, MAX_BOARD_WIDTH, POLICY_ACTIONS_PER_BIRD, SCALAR_FEATURES};
 
 const MIN_SCHEMA_VERSION: u32 = 1;
 const MAX_SCHEMA_VERSION: u32 = 2;
@@ -80,7 +80,27 @@ pub fn predict(state: &GameState, owner: usize, config: &BotConfig) -> Option<Hy
     if encoded.grid.len() != model.input_channels || encoded.scalars.len() != model.scalar_features {
         return None;
     }
-    Some(model.forward(&encoded.grid, &encoded.scalars))
+    let grid = pad_grid(encoded.grid);
+    Some(model.forward(&grid, &encoded.scalars))
+}
+
+/// Zero-pad a [C][H][W] grid to [C][MAX_BOARD_HEIGHT][MAX_BOARD_WIDTH].
+fn pad_grid(grid: Vec<Vec<Vec<f32>>>) -> Vec<Vec<Vec<f32>>> {
+    let h = grid.first().map(|c| c.len()).unwrap_or(0);
+    let w = grid.first().and_then(|c| c.first()).map(|r| r.len()).unwrap_or(0);
+    if h >= MAX_BOARD_HEIGHT && w >= MAX_BOARD_WIDTH {
+        return grid;
+    }
+    grid.into_iter()
+        .map(|channel| {
+            let mut padded = channel;
+            for row in padded.iter_mut() {
+                row.resize(MAX_BOARD_WIDTH, 0.0);
+            }
+            padded.resize(MAX_BOARD_HEIGHT, vec![0.0; MAX_BOARD_WIDTH]);
+            padded
+        })
+        .collect()
 }
 
 pub fn leaf_bonus(prediction: &HybridPrediction, hybrid: &HybridConfig) -> f64 {

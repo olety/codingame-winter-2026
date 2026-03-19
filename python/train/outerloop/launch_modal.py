@@ -39,8 +39,16 @@ def launch_modal(task: str, spec: dict, *, preserve_selfplay_blob: bool = False)
         if task == "arena-screen":
             return _retry_remote(modal_job.run_arena_screen, spec_json)
         if task == "train-teacher":
+            gpu_name = str(spec.get("gpu", "L40S")).strip().upper()
+            if gpu_name == "H100":
+                return _retry_remote(modal_job.train_teacher_h100, spec_json)
+            if gpu_name == "A100":
+                return _retry_remote(modal_job.train_teacher_a100, spec_json)
             return _retry_remote(modal_job.train_teacher_l40s, spec_json)
         if task == "generate-soft-targets":
+            gpu_name = str(spec.get("gpu", "L40S")).strip().upper()
+            if gpu_name == "A100":
+                return _retry_remote(modal_job.generate_soft_targets_a100, spec_json)
             return _retry_remote(modal_job.generate_soft_targets_l40s, spec_json)
     raise ValueError(f"unsupported modal task: {task}")
 

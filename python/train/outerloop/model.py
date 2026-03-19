@@ -5,6 +5,22 @@ from torch import nn
 import torch.nn.functional as F
 
 
+def fake_quantize_int4(weight: torch.Tensor) -> torch.Tensor:
+    """Simulate int4 quantization with straight-through estimator.
+
+    Per-output-channel symmetric quantization to [-8, 7] range.
+    Gradient flows through as if no quantization occurred (STE).
+    """
+    # Per output-channel scale (dim 0 = output channels)
+    reduce_dims = list(range(1, weight.ndim))
+    absmax = weight.abs().amax(dim=reduce_dims, keepdim=True).clamp(min=1e-8)
+    scale = absmax / 7.0  # symmetric: [-8, 7], use 7 as max
+    # Quantize + dequantize
+    w_q = (weight / scale).round().clamp(-8, 7) * scale
+    # STE: detach the rounding error so gradient flows through
+    return weight + (w_q - weight).detach()
+
+
 class TinyHybridNet(nn.Module):
     def __init__(
         self,
@@ -14,10 +30,12 @@ class TinyHybridNet(nn.Module):
         birds_per_player: int = 4,
         actions_per_bird: int = 5,
         num_conv_layers: int = 2,
+        use_qat: bool = False,
     ) -> None:
         super().__init__()
         self.birds_per_player = birds_per_player
         self.actions_per_bird = actions_per_bird
+        self.use_qat = use_qat
         self.conv1 = nn.Conv2d(input_channels, conv_channels, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(conv_channels, conv_channels, kernel_size=3, padding=1)
         self.conv3 = nn.Conv2d(conv_channels, conv_channels, kernel_size=3, padding=1) if num_conv_layers >= 3 else None
@@ -26,17 +44,24 @@ class TinyHybridNet(nn.Module):
         self.policy_head = nn.Linear(feature_dim, birds_per_player * actions_per_bird)
         self.value_head = nn.Linear(feature_dim, 1)
 
+    def _maybe_fq(self, weight: torch.Tensor) -> torch.Tensor:
+        return fake_quantize_int4(weight) if self.use_qat else weight
+
     def forward(self, grid: torch.Tensor, scalars: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        x = torch.relu(self.conv1(grid))
-        x = torch.relu(self.conv2(x))
+        x = F.conv2d(grid, self._maybe_fq(self.conv1.weight), self.conv1.bias, padding=1)
+        x = torch.relu(x)
+        x = F.conv2d(x, self._maybe_fq(self.conv2.weight), self.conv2.bias, padding=1)
+        x = torch.relu(x)
         if self.conv3 is not None:
-            x = torch.relu(self.conv3(x))
+            x = F.conv2d(x, self._maybe_fq(self.conv3.weight), self.conv3.bias, padding=1)
+            x = torch.relu(x)
         pooled = self.pool(x).flatten(1)
         if scalars.ndim == 1:
             scalars = scalars.unsqueeze(0)
         features = torch.cat([pooled, scalars], dim=1)
-        policy = self.policy_head(features).view(-1, self.birds_per_player, self.actions_per_bird)
-        value = torch.tanh(self.value_head(features))
+        policy = F.linear(features, self._maybe_fq(self.policy_head.weight), self.policy_head.bias)
+        policy = policy.view(-1, self.birds_per_player, self.actions_per_bird)
+        value = torch.tanh(F.linear(features, self._maybe_fq(self.value_head.weight), self.value_head.bias))
         return policy, value
 
 

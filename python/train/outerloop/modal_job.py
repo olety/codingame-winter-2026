@@ -26,6 +26,7 @@ REPO_ROOT = _detect_repo_root()
 REMOTE_REPO = Path("/root/repo")
 
 IGNORED_TOP_LEVEL = {
+    ".claude",
     ".git",
     ".prose",
     ".serena",
@@ -123,7 +124,7 @@ def _train_impl(spec_json: str) -> dict:
         else:
             spec["dataset_path"] = _repo_relative_remote(spec["dataset_path"])
 
-        from python.train.outerloop.export_weights import export_weights
+        from python.train.outerloop.export_weights import export_weights, export_weights_int4
         from python.train.outerloop.train_model import train_distill_from_spec, train_from_spec
 
         training_mode = spec.get("training_mode", "standard")
@@ -132,11 +133,26 @@ def _train_impl(spec_json: str) -> dict:
         else:
             metrics = train_from_spec(spec)
         weights_path = output_dir / "hybrid_weights.json"
-        weights_payload = export_weights(
-            Path(metrics["model_path"]),
-            Path(metrics["training_config_path"]),
-            weights_path,
-        )
+        if spec.get("qat_bits"):
+            weights_payload = export_weights_int4(
+                Path(metrics["model_path"]),
+                Path(metrics["training_config_path"]),
+                weights_path,
+            )
+            # Also save int4 weights to Volume
+            run_id = spec.get("run_id", "default")
+            vol_weights_dir = Path(f"/data/{run_id}")
+            vol_weights_dir.mkdir(parents=True, exist_ok=True)
+            int4_path = vol_weights_dir / "weights_int4.json"
+            int4_path.write_text(json.dumps(weights_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            vol.commit()
+            metrics["int4_weights_path"] = str(int4_path)
+        else:
+            weights_payload = export_weights(
+                Path(metrics["model_path"]),
+                Path(metrics["training_config_path"]),
+                weights_path,
+            )
         metrics["model_path"] = "modal://hybrid_model.pt"
         metrics["training_config_path"] = "modal://training_config.json"
         return {
@@ -310,10 +326,10 @@ def _arena_screen_impl(spec_json: str) -> dict:
     image=image,
     gpu="L40S",
     cpu=4.0,
-    memory=32768,
-    timeout=60 * 60,
+    memory=131072,
+    timeout=8 * 60 * 60,
     max_containers=16,
-    volumes={"/data": vol},
+    volumes={"/data": vol, "/r2": r2_mount},
 )
 def train_l40s(spec_json: str) -> dict:
     return _train_impl(spec_json)
@@ -368,7 +384,7 @@ def train_l40s(spec_json: str) -> dict:
     memory=49152,
     timeout=60 * 60,
     max_containers=8,
-    volumes={"/data": vol},
+    volumes={"/data": vol, "/r2": r2_mount},
 )
 def train_a100(spec_json: str) -> dict:
     return _train_impl(spec_json)
@@ -399,6 +415,12 @@ def run_arena_screen(spec_json: str) -> dict:
 
 
 def _train_teacher_impl(spec_json: str) -> dict:
+    # Persist Triton/Inductor autotune cache on Volume to skip 30min compile on reruns
+    cache_dir = "/data/triton_cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    os.environ["TRITON_CACHE_DIR"] = cache_dir
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir
+
     sys.path.insert(0, str(REMOTE_REPO))
     spec = json.loads(spec_json)
     spec = dict(spec)
@@ -455,8 +477,10 @@ def _generate_soft_targets_impl(spec_json: str) -> dict:
                 encoding="utf-8",
             )
             spec["teacher_training_config_path"] = str(teacher_config_path)
-        # Resolve dataset
-        if "volume_dataset_path" in spec:
+        # Resolve dataset: R2 bitpacked > Volume > fallback
+        if "r2_bitpacked_path" in spec:
+            spec["dataset_path"] = spec.pop("r2_bitpacked_path")
+        elif "volume_dataset_path" in spec:
             dataset_path = tmpdir_path / "dataset.jsonl"
             dataset_path.write_bytes(Path(spec.pop("volume_dataset_path")).read_bytes())
             spec["dataset_path"] = str(dataset_path)
@@ -469,13 +493,15 @@ def _generate_soft_targets_impl(spec_json: str) -> dict:
         from python.train.outerloop.train_model import generate_soft_targets
 
         result = generate_soft_targets(spec)
-        # Write augmented dataset to Volume
+        # Copy output files to Volume
         run_id = spec.get("run_id", "default")
-        vol_out = Path(f"/data/{run_id}/augmented/dataset.jsonl")
-        vol_out.parent.mkdir(parents=True, exist_ok=True)
-        vol_out.write_bytes(output_path.read_bytes())
+        vol_dir = Path(f"/data/{run_id}/augmented")
+        vol_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = Path(result["output_path"]).parent
+        for f in output_dir.glob("teacher_predictions*"):
+            (vol_dir / f.name).write_bytes(f.read_bytes())
         vol.commit()
-        result["volume_augmented_path"] = str(vol_out)
+        result["volume_augmented_path"] = str(vol_dir)
         result["task"] = "generate-soft-targets"
         return result
 
@@ -497,10 +523,10 @@ def train_teacher_l40s(spec_json: str) -> dict:
     image=image,
     gpu="A100",
     cpu=6.0,
-    memory=196608,
+    memory=49152,
     timeout=24 * 60 * 60,
     max_containers=4,
-    volumes={"/data": vol},
+    volumes={"/data": vol, "/r2": r2_mount},
 )
 def train_teacher_a100(spec_json: str) -> dict:
     return _train_teacher_impl(spec_json)
@@ -509,12 +535,11 @@ def train_teacher_a100(spec_json: str) -> dict:
 @app.function(
     image=image,
     gpu="H100",
-    cpu=8.0,
-    memory=196608,
+    cpu=6.0,
+    memory=49152,
     timeout=24 * 60 * 60,
     max_containers=4,
-    volumes={"/data": vol},
-    cloud_bucket_mounts={"/r2": r2_mount},
+    volumes={"/data": vol, "/r2": r2_mount},
 )
 def train_teacher_h100(spec_json: str) -> dict:
     return _train_teacher_impl(spec_json)
@@ -527,7 +552,7 @@ def train_teacher_h100(spec_json: str) -> dict:
     memory=32768,
     timeout=60 * 60,
     max_containers=8,
-    volumes={"/data": vol},
+    volumes={"/data": vol, "/r2": r2_mount},
 )
 def generate_soft_targets_l40s(spec_json: str) -> dict:
     return _generate_soft_targets_impl(spec_json)
@@ -538,9 +563,9 @@ def generate_soft_targets_l40s(spec_json: str) -> dict:
     gpu="A100",
     cpu=6.0,
     memory=49152,
-    timeout=60 * 60,
+    timeout=2 * 60 * 60,
     max_containers=4,
-    volumes={"/data": vol},
+    volumes={"/data": vol, "/r2": r2_mount},
 )
 def generate_soft_targets_a100(spec_json: str) -> dict:
     return _generate_soft_targets_impl(spec_json)

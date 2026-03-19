@@ -8,6 +8,9 @@ pub const SCALAR_FEATURES: usize = 6;
 pub const MAX_BIRDS_PER_PLAYER: usize = 4;
 pub const POLICY_ACTIONS_PER_BIRD: usize = 5;
 pub const HYBRID_GRID_CHANNELS: usize = 19;
+/// Max board dimensions from upstream referee GridMaker.java.
+pub const MAX_BOARD_HEIGHT: usize = 24;
+pub const MAX_BOARD_WIDTH: usize = 44;
 const VALUE_SCALE: f32 = 12.0;
 
 #[derive(Clone, Debug, Serialize)]

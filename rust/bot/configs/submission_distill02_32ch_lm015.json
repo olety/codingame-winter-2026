@@ -1,0 +1,18 @@
+{
+  "name": "hybrid-32ch-distill02-lm015",
+  "eval": {
+    "body": 120.0, "loss": 18.0, "mobility": 7.5, "apple": 16.0,
+    "stability": 10.0, "breakpoint": 9.0, "fragile_attack": 8.0, "terminal": 10000.0
+  },
+  "search": {
+    "first_turn_ms": 850, "later_turn_ms": 40,
+    "deepen_top_my": 6, "deepen_top_opp": 8,
+    "deepen_child_my": 3, "deepen_child_opp": 3,
+    "extra_nodes_after_root": 5000
+  },
+  "hybrid": {
+    "weights_path": "../weights/distill02_32ch_3L.json",
+    "prior_mix": 0.0, "leaf_mix": 0.15, "value_scale": 48.0,
+    "prior_depth_limit": 0, "leaf_depth_limit": 0
+  }
+}

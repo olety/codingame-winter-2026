@@ -20,3 +20,13 @@ JulienMain.java
 *.sqlite
 cp.txt
 /submission/flattened_main
+/data/
+.DS_Store
+.serena/
+c_bot/bot
+c_bot/bot_old
+c_bot/bot_new
+c_bot/bot_debug
+c_bot/bot_v3*
+/submission/timing_probe*
+/submission/flattened_distill02*
