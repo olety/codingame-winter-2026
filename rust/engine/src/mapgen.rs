@@ -140,6 +140,27 @@ impl GridMaker {
             }
         }
 
+        // Fallback apple generation: if too few apples, use a better method
+        if grid.apples.len() < 8 {
+            grid.apples.clear();
+            let mut free_tiles: Vec<_> = grid
+                .coords()
+                .into_iter()
+                .filter(|c| grid.get(*c) == Some(TileType::Empty))
+                .collect();
+            self.random.shuffle(&mut free_tiles);
+
+            let min_apples_coords = (0.025 * free_tiles.len() as f64) as usize;
+            let min_apples_coords = min_apples_coords.max(4);
+            while grid.apples.len() < min_apples_coords * 2 && !free_tiles.is_empty() {
+                let c = free_tiles.remove(0);
+                let opp = grid.opposite(c);
+                grid.apples.push(c);
+                grid.apples.push(opp);
+                free_tiles.retain(|t| *t != opp);
+            }
+        }
+
         for coord in coords.iter().copied() {
             if grid.get(coord) != Some(TileType::Wall) {
                 continue;
@@ -232,6 +253,16 @@ pub fn initial_state_from_seed(seed: i64, league_level: i32) -> GameState {
                     .into_iter()
                     .map(|coord| state.grid.opposite(coord))
                     .collect::<Vec<_>>();
+            }
+            // Check if head is enclosed (walls on both sides) and clear left wall
+            let head = body[0];
+            let left = head.add(-1, 0);
+            let right = head.add(1, 0);
+            if state.grid.get(left) == Some(TileType::Wall)
+                && state.grid.get(right) == Some(TileType::Wall)
+            {
+                state.grid.set(left, TileType::Empty);
+                state.grid.set(state.grid.opposite(left), TileType::Empty);
             }
             state.add_bird(next_bird_id, owner, body, None);
             next_bird_id += 1;

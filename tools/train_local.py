@@ -146,7 +146,8 @@ def main():
 
                 # Track best and set up resume
                 ckpt_dir = Path(output_dir) / "checkpoints"
-                latest_ckpt = sorted(ckpt_dir.glob("distill_epoch*.pt"))
+                latest_ckpt = sorted(ckpt_dir.glob("distill_epoch*.pt"),
+                                     key=lambda p: int(p.stem.replace("distill_epoch", "")))
                 if latest_ckpt:
                     resume_path = str(latest_ckpt[-1])
 

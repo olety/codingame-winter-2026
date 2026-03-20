@@ -242,13 +242,24 @@ static bool body_in_list(const Coord* body, int len, Coord c) {
         if (body[i].x == c.x && body[i].y == c.y) return true;
     return false;
 }
-static bool solid_under(const State* s, Coord c, const Coord* ignore, int nignore) {
+/* Check if there's a wall or apple directly below coord (NOT checking other birds) */
+static bool has_tile_or_apple_under(const State* s, Coord c) {
     Coord below = coord(c.x, c.y + 1);
-    if (body_in_list(ignore, nignore, below)) return false;
     if (grid_valid(&s->grid, below) && s->grid.walls[below.y][below.x]) return true;
-    for (int i = 0; i < s->nbirds; i++)
-        if (s->birds[i].alive && bird_contains(&s->birds[i], below)) return true;
     if (apple_index(&s->grid, below) >= 0) return true;
+    return false;
+}
+/* Check if coord is grounded (tile/apple under, bottom of map, or grounded bird under) */
+static bool is_grounded(const State* s, Coord c, const bool* grounded_birds) {
+    if (has_tile_or_apple_under(s, c)) return true;
+    Coord below = coord(c.x, c.y + 1);
+    /* Bottom of map = grounded */
+    if (!grid_valid(&s->grid, below)) return true;
+    /* Check grounded birds */
+    for (int i = 0; i < s->nbirds; i++) {
+        if (!s->birds[i].alive || !grounded_birds[i]) continue;
+        if (bird_contains(&s->birds[i], below)) return true;
+    }
     return false;
 }
 static void shift_bird_down(Bird* b) {
@@ -262,41 +273,82 @@ static int collect_body(const Bird* b, Coord* out) {
         out[i] = bird_seg(b, i);
     return b->len;
 }
-static bool apply_individual_falls(State* s) {
-    bool moved = false;
-    Coord buf[MAX_BODY];
+/* Phase 1: Grounding flood-fill + airborne fall */
+static bool apply_falls_new(State* s) {
+    bool something_fell = false;
+    bool airborne[MAX_BIRDS];
+    bool grounded[MAX_BIRDS];
+    /* Start: all live birds are airborne */
     for (int i = 0; i < s->nbirds; i++) {
-        if (!s->birds[i].alive) continue;
-        int n = collect_body(&s->birds[i], buf);
-        bool can_fall = true;
-        for (int j = 0; j < n; j++)
-            if (solid_under(s, buf[j], buf, n)) { can_fall = false; break; }
-        if (can_fall) {
-            moved = true;
-            shift_bird_down(&s->birds[i]);
-            bool all_off = true;
-            for (int j = 0; j < s->birds[i].len; j++)
-                if (bird_seg(&s->birds[i], j).y < s->grid.h + 1) { all_off = false; break; }
-            if (all_off) s->birds[i].alive = false;
+        airborne[i] = s->birds[i].alive;
+        grounded[i] = false;
+    }
+    /* Grounding flood-fill */
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int i = 0; i < s->nbirds; i++) {
+            if (!airborne[i]) continue;
+            /* Check if any segment is grounded */
+            bool is_gnd = false;
+            for (int j = 0; j < s->birds[i].len && !is_gnd; j++) {
+                Coord seg = bird_seg(&s->birds[i], j);
+                if (is_grounded(s, seg, grounded)) is_gnd = true;
+            }
+            if (is_gnd) {
+                airborne[i] = false;
+                grounded[i] = true;
+                changed = true;
+            }
         }
     }
-    return moved;
+    /* Fall: all remaining airborne birds fall 1 row */
+    for (int i = 0; i < s->nbirds; i++) {
+        if (!airborne[i]) continue;
+        something_fell = true;
+        shift_bird_down(&s->birds[i]);
+        /* Check out of bounds: ALL segments y >= height+1 */
+        bool all_off = true;
+        for (int j = 0; j < s->birds[i].len; j++)
+            if (bird_seg(&s->birds[i], j).y < s->grid.h + 1) { all_off = false; break; }
+        if (all_off) s->birds[i].alive = false;
+    }
+    return something_fell;
 }
-static bool birds_touching(const Bird* a, const Bird* b) {
+/* Vertical-only adjacency: manhattan==1 AND same x-coordinate */
+static bool birds_touching_vertically(const Bird* a, const Bird* b) {
     for (int i = 0; i < a->len; i++)
-        for (int j = 0; j < b->len; j++)
-            if (manhattan(bird_seg(a, i), bird_seg(b, j)) == 1) return true;
+        for (int j = 0; j < b->len; j++) {
+            Coord sa = bird_seg(a, i), sb = bird_seg(b, j);
+            if (sa.x == sb.x && manhattan(sa, sb) == 1) return true;
+        }
     return false;
 }
+/* Phase 2: Intercoiled falls — groups of vertically-touching birds */
 static bool apply_intercoiled_falls(State* s) {
     bool moved = false;
     bool seen[MAX_BIRDS];
     memset(seen, 0, sizeof(seen));
-    int alive_idx[MAX_BIRDS], nalive = 0;
-    for (int i = 0; i < s->nbirds; i++)
-        if (s->birds[i].alive) alive_idx[nalive++] = i;
-    for (int start = 0; start < nalive; start++) {
-        int si = alive_idx[start];
+    /* Filter: only birds where NO segment has tile/apple below */
+    bool eligible[MAX_BIRDS];
+    int eligible_idx[MAX_BIRDS], neligible = 0;
+    for (int i = 0; i < s->nbirds; i++) {
+        eligible[i] = false;
+        if (!s->birds[i].alive) continue;
+        bool has_support = false;
+        for (int j = 0; j < s->birds[i].len; j++) {
+            if (has_tile_or_apple_under(s, bird_seg(&s->birds[i], j))) {
+                has_support = true;
+                break;
+            }
+        }
+        if (!has_support) {
+            eligible[i] = true;
+            eligible_idx[neligible++] = i;
+        }
+    }
+    for (int start = 0; start < neligible; start++) {
+        int si = eligible_idx[start];
         if (seen[si]) continue;
         int group[MAX_BIRDS], ng = 0;
         int queue[MAX_BIRDS], qh = 0, qt = 0;
@@ -306,14 +358,15 @@ static bool apply_intercoiled_falls(State* s) {
             if (seen[cur]) continue;
             seen[cur] = true;
             group[ng++] = cur;
-            for (int j = 0; j < nalive; j++) {
-                int oi = alive_idx[j];
+            for (int j = 0; j < neligible; j++) {
+                int oi = eligible_idx[j];
                 if (cur == oi || seen[oi]) continue;
-                if (birds_touching(&s->birds[cur], &s->birds[oi]))
+                if (birds_touching_vertically(&s->birds[cur], &s->birds[oi]))
                     queue[qt++] = oi;
             }
         }
         if (ng <= 1) continue;
+        /* Check if any segment in the group sits on a non-group bird */
         Coord meta[MAX_BIRDS * MAX_BODY];
         int nm = 0;
         for (int i = 0; i < ng; i++) {
@@ -322,24 +375,32 @@ static bool apply_intercoiled_falls(State* s) {
                 meta[nm++] = bird_seg(b, j);
         }
         bool can_fall = true;
-        for (int i = 0; i < nm; i++)
-            if (solid_under(s, meta[i], meta, nm)) { can_fall = false; break; }
+        for (int mi = 0; mi < nm && can_fall; mi++) {
+            Coord below = coord(meta[mi].x, meta[mi].y + 1);
+            if (body_in_list(meta, nm, below)) continue;
+            for (int bi = 0; bi < s->nbirds; bi++) {
+                if (!s->birds[bi].alive) continue;
+                if (bird_contains(&s->birds[bi], below)) { can_fall = false; break; }
+            }
+        }
         if (!can_fall) continue;
         moved = true;
         for (int i = 0; i < ng; i++) {
             shift_bird_down(&s->birds[group[i]]);
-            if (bird_head(&s->birds[group[i]]).y >= s->grid.h)
-                s->birds[group[i]].alive = false;
+            /* Out-of-bounds: ALL segments y >= height+1 */
+            bool all_off = true;
+            for (int j = 0; j < s->birds[group[i]].len; j++)
+                if (bird_seg(&s->birds[group[i]], j).y < s->grid.h + 1) { all_off = false; break; }
+            if (all_off) s->birds[group[i]].alive = false;
         }
     }
     return moved;
 }
 static void apply_falls(State* s) {
-    bool something = true;
-    while (something) {
-        something = false;
-        while (apply_individual_falls(s)) something = true;
-        if (apply_intercoiled_falls(s)) something = true;
+    bool fell = true;
+    while (fell) {
+        fell = apply_falls_new(s);       /* grounding flood-fill + airborne fall */
+        fell |= apply_intercoiled_falls(s); /* updated intercoiled */
     }
 }
 static void step(State* s, const Action* p0, const Action* p1) {
@@ -724,17 +785,35 @@ static double support_stability(const State* s, int owner) {
 static double breakpoint_sc(const State* s, int owner) {
     return (double)(break_count(s, owner) - break_count(s, 1 - owner));
 }
+/* Turn-distance: Manhattan + penalty for facing wrong direction */
+static int turn_distance(Coord head, int facing, Coord target) {
+    int md = manhattan(head, target);
+    if (facing < 0 || facing > 3 || md == 0) return md;
+    int dx = target.x - head.x;
+    int dy = target.y - head.y;
+    int tdx = (dx > 0) ? 1 : (dx < 0) ? -1 : 0;
+    int tdy = (dy > 0) ? 1 : (dy < 0) ? -1 : 0;
+    int dot = DX[facing] * tdx + DY[facing] * tdy;
+    if (dot < 0) return md + 2; /* facing opposite */
+    if (dot == 0) return md + 1; /* perpendicular */
+    return md;
+}
 /* Distinct-apple coverage: reward spreading birds across different apples */
 static double apple_coverage(const State* s, int owner) {
-    /* Greedy assignment: for each side, assign birds to distinct nearest apples */
+    /* Greedy assignment: for each side, assign birds to distinct nearest apples.
+       Uses turn_distance (facing-aware) for better opening coordination. */
     double my_sc = 0, opp_sc = 0;
     for (int side = 0; side < 2; side++) {
         int p = (side == 0) ? owner : 1 - owner;
         Coord heads[MAX_BIRDS_PP];
+        int facings[MAX_BIRDS_PP];
         int nh = 0;
         for (int i = 0; i < s->nbirds; i++)
-            if (s->birds[i].owner == p && s->birds[i].alive && nh < MAX_BIRDS_PP)
-                heads[nh++] = bird_head(&s->birds[i]);
+            if (s->birds[i].owner == p && s->birds[i].alive && nh < MAX_BIRDS_PP) {
+                heads[nh] = bird_head(&s->birds[i]);
+                facings[nh] = bird_facing(&s->birds[i]);
+                nh++;
+            }
         if (nh == 0 || s->grid.napples == 0) continue;
         bool bird_used[MAX_BIRDS_PP] = {false};
         bool apple_used[MAX_APPLES] = {false};
@@ -746,7 +825,7 @@ static double apple_coverage(const State* s, int owner) {
                 if (bird_used[b]) continue;
                 for (int a = 0; a < s->grid.napples; a++) {
                     if (apple_used[a]) continue;
-                    int d = manhattan(heads[b], s->grid.apples[a]);
+                    int d = turn_distance(heads[b], facings[b], s->grid.apples[a]);
                     if (d < best_d) { best_d = d; best_b = b; best_a = a; }
                 }
             }
@@ -1353,6 +1432,12 @@ static SearchResult choose_action_maximin(const State* s, int owner, double dead
             if (bi >= 0) opp_repr[nrepr++] = bi;
         }
     }
+    /* Detect opening: all birds len ≤ 4, early turns */
+    bool is_opening = (s->turn <= 5);
+    if (is_opening) {
+        for (int i = 0; i < s->nbirds; i++)
+            if (s->birds[i].alive && s->birds[i].len > 4) { is_opening = false; break; }
+    }
     double my_prior[MAX_ACTIONS];
     int my_order[MAX_ACTIONS];
     for (int a = 0; a < nmy; a++) {
@@ -1362,6 +1447,42 @@ static SearchResult choose_action_maximin(const State* s, int owner, double dead
             sum += evaluate(&nx, owner);
         }
         my_prior[a] = sum / nrepr;
+        /* Opening spread bonus: absolute coverage quality for MY birds (not differential).
+           On symmetric maps, the differential coverage is ~0, but absolute spread still varies. */
+        if (is_opening) {
+            State nx = sim_state(s, owner, &my_acts[a], &opp_acts[0]);
+            Coord heads[MAX_BIRDS_PP];
+            int facings[MAX_BIRDS_PP];
+            int nh = 0;
+            for (int i = 0; i < nx.nbirds; i++)
+                if (nx.birds[i].owner == owner && nx.birds[i].alive && nh < MAX_BIRDS_PP) {
+                    heads[nh] = bird_head(&nx.birds[i]);
+                    facings[nh] = bird_facing(&nx.birds[i]);
+                    nh++;
+                }
+            if (nh > 1 && nx.grid.napples > 0) {
+                bool bird_used[MAX_BIRDS_PP] = {false};
+                bool apple_used[MAX_APPLES] = {false};
+                double spread = 0;
+                int nassign = nh < nx.grid.napples ? nh : nx.grid.napples;
+                for (int k = 0; k < nassign; k++) {
+                    int best_b = -1, best_a = -1, best_d = 9999;
+                    for (int b = 0; b < nh; b++) {
+                        if (bird_used[b]) continue;
+                        for (int ai = 0; ai < nx.grid.napples; ai++) {
+                            if (apple_used[ai]) continue;
+                            int d = turn_distance(heads[b], facings[b], nx.grid.apples[ai]);
+                            if (d < best_d) { best_d = d; best_b = b; best_a = ai; }
+                        }
+                    }
+                    if (best_b < 0) break;
+                    bird_used[best_b] = true;
+                    apple_used[best_a] = true;
+                    spread += 1.0 / (double)(best_d + 1);
+                }
+                my_prior[a] += EVAL_COVERAGE * spread; /* ~40 * spread as ordering bonus */
+            }
+        }
         my_order[a] = a;
     }
     sort_desc(my_order, my_prior, nmy);
@@ -1595,10 +1716,11 @@ static SearchResult choose_action_maximin(const State* s, int owner, double dead
         int bs2[2]; body_scores(s, bs2);
         double bd2 = (double)(bs2[owner] - bs2[1 - owner]);
         double ld2 = (double)(s->losses[1 - owner] - s->losses[owner]);
-        fprintf(stderr, "  EVAL: body=%.0f loss=%.0f mob=%.1f apple=%.1f stab=%.1f brk=%.1f frag=%.1f dng=%.1f grav=%.1f\n",
+        fprintf(stderr, "  EVAL: body=%.0f loss=%.0f mob=%.1f apple=%.1f cov=%.1f stab=%.1f brk=%.1f frag=%.1f dng=%.1f grav=%.1f\n",
                 EVAL_BODY * bd2, EVAL_LOSS * ld2,
                 EVAL_MOBILITY * mobility_score(s, owner),
                 EVAL_APPLE * apple_race(s, owner),
+                EVAL_COVERAGE * apple_coverage(s, owner),
                 EVAL_STABILITY * support_stability(s, owner),
                 EVAL_BREAKPOINT * breakpoint_sc(s, owner),
                 EVAL_FRAGILE * fragile_attack(s, owner),

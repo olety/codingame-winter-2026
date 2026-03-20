@@ -373,32 +373,46 @@ impl GameState {
 
     fn apply_falls(&mut self) {
         let mut something_fell = true;
-        while something_fell {
-            something_fell = false;
-            while self.apply_individual_falls() {
-                something_fell = true;
-            }
-            if self.apply_intercoiled_falls() {
-                something_fell = true;
-            }
-        }
-    }
 
-    fn apply_individual_falls(&mut self) -> bool {
-        let mut moved = false;
-        let alive_indices: Vec<_> = self
+        // All live birds start as airborne
+        let mut airborne: BTreeSet<usize> = self
             .birds
             .iter()
             .enumerate()
             .filter_map(|(idx, bird)| bird.alive.then_some(idx))
             .collect();
-        for idx in alive_indices {
-            let body: Vec<_> = self.birds[idx].body.iter().copied().collect();
-            let can_fall = body
-                .iter()
-                .all(|coord| !self.something_solid_under(*coord, &body));
-            if can_fall {
-                moved = true;
+        let mut grounded: BTreeSet<usize> = BTreeSet::new();
+
+        while something_fell {
+            something_fell = false;
+
+            // Grounding phase: flood-fill from ground/walls/apples.
+            // A bird is grounded if ANY segment has a wall/apple below it
+            // OR has a grounded bird's segment below it.
+            let mut something_got_grounded = true;
+            while something_got_grounded {
+                something_got_grounded = false;
+                let mut newly_grounded = Vec::new();
+                for &idx in &airborne {
+                    let is_grounded = self.birds[idx]
+                        .body
+                        .iter()
+                        .any(|c| self.is_grounded(*c, &grounded));
+                    if is_grounded {
+                        newly_grounded.push(idx);
+                        something_got_grounded = true;
+                    }
+                }
+                for idx in newly_grounded {
+                    airborne.remove(&idx);
+                    grounded.insert(idx);
+                }
+            }
+
+            // Fall phase: all remaining airborne birds fall 1 row
+            let mut out_of_bounds = Vec::new();
+            for &idx in &airborne {
+                something_fell = true;
                 self.shift_bird_down(idx);
                 if self.birds[idx]
                     .body
@@ -406,95 +420,37 @@ impl GameState {
                     .all(|coord| coord.y >= self.grid.height + 1)
                 {
                     self.birds[idx].alive = false;
+                    out_of_bounds.push(idx);
                 }
             }
+            for idx in out_of_bounds {
+                airborne.remove(&idx);
+            }
         }
-        moved
     }
 
-    fn apply_intercoiled_falls(&mut self) -> bool {
-        let groups = self.intercoiled_groups();
-        let mut moved = false;
-        for group in groups {
-            let meta_body: Vec<_> = group
-                .iter()
-                .flat_map(|idx| self.birds[*idx].body.iter().copied())
-                .collect();
-            let can_fall = meta_body
-                .iter()
-                .all(|coord| !self.something_solid_under(*coord, &meta_body));
-            if !can_fall {
-                continue;
-            }
-            moved = true;
-            for idx in group {
-                self.shift_bird_down(idx);
-                if self.birds[idx].head().y >= self.grid.height {
-                    self.birds[idx].alive = false;
-                }
-            }
+    /// Check if the tile directly below `coord` is a wall or apple (ignoring birds).
+    fn has_tile_or_apple_under(&self, coord: Coord) -> bool {
+        let below = coord.add(0, 1);
+        if self.grid.get(below) == Some(TileType::Wall) {
+            return true;
         }
-        moved
+        self.grid.apples.contains(&below)
     }
 
-    fn intercoiled_groups(&self) -> Vec<Vec<usize>> {
-        let alive_indices: Vec<_> = self
-            .birds
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, bird)| bird.alive.then_some(idx))
-            .collect();
-        let mut groups = Vec::new();
-        let mut seen = BTreeSet::new();
-        for idx in alive_indices.iter().copied() {
-            if seen.contains(&idx) {
-                continue;
-            }
-            let mut group = Vec::new();
-            let mut queue = VecDeque::from([idx]);
-            while let Some(current) = queue.pop_front() {
-                if !seen.insert(current) {
-                    continue;
-                }
-                group.push(current);
-                for other in alive_indices.iter().copied() {
-                    if current == other || seen.contains(&other) {
-                        continue;
-                    }
-                    if birds_are_touching(&self.birds[current], &self.birds[other]) {
-                        queue.push_back(other);
-                    }
-                }
-            }
-            if group.len() > 1 {
-                groups.push(group);
-            }
-        }
-        groups
+    /// Check if a coordinate is grounded: has a wall/apple below, or a grounded bird below.
+    fn is_grounded(&self, coord: Coord, grounded_indices: &BTreeSet<usize>) -> bool {
+        let under = coord.add(0, 1);
+        self.has_tile_or_apple_under(coord)
+            || grounded_indices
+                .iter()
+                .any(|&idx| self.birds[idx].body.contains(&under))
     }
 
     fn shift_bird_down(&mut self, idx: usize) {
         for coord in self.birds[idx].body.iter_mut() {
             coord.y += 1;
         }
-    }
-
-    fn something_solid_under(&self, coord: Coord, ignore_body: &[Coord]) -> bool {
-        let below = coord.add(0, 1);
-        if ignore_body.contains(&below) {
-            return false;
-        }
-        if self.grid.get(below) == Some(TileType::Wall) {
-            return true;
-        }
-        if self
-            .birds
-            .iter()
-            .any(|bird| bird.alive && bird.body.contains(&below))
-        {
-            return true;
-        }
-        self.grid.apples.contains(&below)
     }
 
     pub fn is_game_over(&self) -> bool {
@@ -551,11 +507,6 @@ impl GameState {
     }
 }
 
-fn birds_are_touching(a: &BirdState, b: &BirdState) -> bool {
-    a.body
-        .iter()
-        .any(|left| b.body.iter().any(|right| left.manhattan_to(*right) == 1))
-}
 
 #[cfg(test)]
 mod tests {
