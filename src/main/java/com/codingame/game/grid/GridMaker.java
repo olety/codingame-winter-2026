@@ -6,16 +6,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
 
 import javax.imageio.ImageIO;
 
-import com.codingame.game.Game;
-import com.codingame.game.Player;
-import com.codingame.gameengine.core.MultiplayerGameManager;
-import com.google.inject.Inject;
 import com.google.inject.Singleton;
 
 @Singleton
@@ -43,7 +40,7 @@ public class GridMaker {
     public static int DESIRED_SPAWNS = 4;
 
     public Grid makeFromImage() {
-        BufferedImage img = loadImage("/levels/collision_test.bmp");
+        BufferedImage img = loadImage("/levels/level_gravity_test.bmp");
         parsePixels(img);
         return grid;
     }
@@ -62,7 +59,7 @@ public class GridMaker {
         }
 
         double rand = random.nextDouble();
-        
+
         int height = MIN_GRID_HEIGHT +
             (int) Math.round(
                 Math.pow(rand, skew) *
@@ -169,6 +166,23 @@ public class GridMaker {
             }
         }
 
+        // Previous technique could spawn no apples, so without changing the result of too many existing seeds, here is a better generation method:
+        if (grid.apples.size() < 8) {
+            grid.apples.clear();
+            LinkedList<Coord> freeTiles = new LinkedList<>();
+            freeTiles = new LinkedList<>(grid.cells.keySet().stream().filter(c -> grid.get(c).getType() == Tile.TYPE_EMPTY).toList());
+            Collections.shuffle(freeTiles, random);
+
+            //Spawn a few apples
+            int minApplesCoords = Math.max(4, (int) (0.025 * freeTiles.size()));
+            while (grid.apples.size() < minApplesCoords * 2 && !freeTiles.isEmpty()) {
+                Coord c = freeTiles.poll();
+                grid.apples.add(c);
+                grid.apples.add(grid.opposite(c));
+                freeTiles.remove(grid.opposite(c));
+            }
+        }
+
         // Convert lone walls to apples
         for (Coord c : grid.cells.keySet()) {
             if (grid.get(c).getType() == Tile.TYPE_EMPTY) {
@@ -248,7 +262,6 @@ public class GridMaker {
         if (grid.apples.size() != grid.apples.stream().distinct().count()) {
             throw new RuntimeException("Duplicate apples");
         }
-
     }
 
     private List<Coord> getFreeAbove(Coord c, int by) {
@@ -293,7 +306,7 @@ public class GridMaker {
                     grid.spawns.add(coord);
                 } else if (rgb == COLOR_DEBUG_SPAWN) {
                     grid.spawns.add(grid.opposite(coord));
-                } else {
+                } else if (rgb != 0xFFFFFFFF) {
                     System.out.println("error " + Integer.toHexString(rgb) + " at " + x + "," + y);
                 }
             }

@@ -2,7 +2,9 @@
 package com.codingame.game;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -10,6 +12,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import com.codingame.event.Animation;
@@ -46,7 +49,6 @@ public class Game {
         initGrid(random);
         initPlayers();
 
-        
     }
 
     private void initPlayers() {
@@ -64,6 +66,15 @@ public class Game {
                         c = grid.opposite(c);
                     }
                     bird.body.add(c);
+                    if (bird.body.size() == 1) {
+                        // Is the head enclosed?
+                        Tile left = grid.get(c.add(-1, 0));
+                        Tile right = grid.get(c.add(1, 0));
+                        if (left.getType() == Tile.TYPE_WALL && right.getType() == Tile.TYPE_WALL) {
+                            grid.get(c.add(-1, 0)).clear();
+                            grid.get(grid.opposite(c.add(-1, 0))).clear();
+                        }
+                    }
                 }
             }
 
@@ -91,7 +102,6 @@ public class Game {
     private void initGrid(Random random) {
         GridMaker gridMaker = new GridMaker(random, gameManager.getLeagueLevel());
         this.grid = gridMaker.make();
-
     }
 
     public void resetGameTurnData() {
@@ -178,6 +188,20 @@ public class Game {
         grid.apples.removeAll(applesEatenThisTurn);
     }
 
+    private boolean hasTileOrAppleUnder(Coord c) {
+        Coord below = c.add(0, 1);
+        if (grid.get(below).getType() == Tile.TYPE_WALL) {
+            return true;
+        }
+
+        for (Coord a : grid.apples) {
+            if (a.equals(below)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private boolean somethingSolidUnder(Coord c, List<Coord> ignoreBody) {
         Coord below = c.add(0, 1);
         if (ignoreBody.contains(below)) {
@@ -200,36 +224,52 @@ public class Game {
         return false;
     }
 
+    private boolean isGrounded(Coord c, Set<Bird> frozenBirds) {
+        // Check if a coordinate touches the ground or a frozen bird
+        Coord under = c.add(0, 1);
+        return hasTileOrAppleUnder(c) ||
+            frozenBirds.stream().anyMatch(b -> b.body.contains(under));
+    }
+
     private void doFalls() {
         boolean somethingFell = true;
         Map<Integer, Integer> fallDistances = new TreeMap<>();
+
         List<Bird> outOfBounds = new ArrayList<>();
+        Set<Bird> airborneBirds = new HashSet<>(getLiveBirds());
+        Set<Bird> groundedBirds = new HashSet<>();
 
         while (somethingFell) {
-            while (somethingFell) {
-                somethingFell = false;
+            somethingFell = false;
+            boolean somethingGotGrounded = true;
 
-                List<Bird> allBirds = getLiveBirds();
-
-                for (Bird bird : allBirds) {
-                    boolean canFall = bird.body.stream().noneMatch(c -> somethingSolidUnder(c, bird.body));
-                    if (canFall) {
-                        somethingFell = true;
-                        bird.body = new LinkedList<>(bird.body.stream().map(c -> c.add(0, 1)).toList());
-                        fallDistances.compute(bird.id, (k, v) -> v == null ? 1 : v + 1);
-
-                        // check out of bounds
-                        if (bird.body.stream().allMatch(part -> part.getY() >= grid.height + 1)) {
-                            bird.alive = false;
-                            outOfBounds.add(bird);
-                        }
+            while (somethingGotGrounded) {
+                somethingGotGrounded = false;
+                for (Bird bird : airborneBirds) {
+                    boolean isGrounded = bird.body.stream().anyMatch(c -> isGrounded(c, groundedBirds));
+                    if (isGrounded) {
+                        groundedBirds.add(bird);
+                        somethingGotGrounded = true;
                     }
+                }
+                airborneBirds.removeAll(groundedBirds);
+            }
+
+            for (Bird bird : airborneBirds) {
+
+                somethingFell = true;
+                bird.body = new LinkedList<>(bird.body.stream().map(c -> c.add(0, 1)).toList());
+                fallDistances.compute(bird.id, (k, v) -> v == null ? 1 : v + 1);
+
+                // check out of bounds
+                if (bird.body.stream().allMatch(part -> part.getY() >= grid.height + 1)) {
+                    bird.alive = false;
+                    outOfBounds.add(bird);
                 }
 
             }
-            // Handle intercoiled birds
-            somethingFell |= doIntercoiledFalls(fallDistances, outOfBounds);
 
+            airborneBirds.removeAll(outOfBounds);
         }
 
         for (Integer birdId : fallDistances.keySet()) {
@@ -248,6 +288,11 @@ public class Game {
         List<List<Bird>> intercoiledGroups = new ArrayList<>();
         List<Bird> allBirds = getLiveBirds();
         Set<Bird> visited = new HashSet<>();
+
+        // Restrict to birds that are not on solid ground
+        allBirds = allBirds.stream()
+            .filter(b -> b.body.stream().noneMatch(c -> hasTileOrAppleUnder(c))).toList();
+
         for (Bird bird : allBirds) {
             if (visited.contains(bird)) {
                 continue;
@@ -272,7 +317,7 @@ public class Game {
                     }
 
                     // Are they adjacent?
-                    boolean adj = birdsAreTouching(current, other);
+                    boolean adj = birdsAreTouchingVertically(current, other);
                     if (adj) {
                         toVisit.add(other);
                     }
@@ -304,7 +349,7 @@ public class Game {
                         bird.body = new LinkedList<>(bird.body.stream().map(c -> c.add(0, 1)).toList());
                         fallDistances.compute(bird.id, (k, v) -> v == null ? 1 : v + 1);
                         // check out of bounds
-                        if (bird.getHeadPos().getY() >= grid.height) {
+                        if (bird.body.stream().allMatch(part -> part.getY() >= grid.height + 1)) {
                             bird.alive = false;
                             outOfBounds.add(bird);
                         }
@@ -317,10 +362,10 @@ public class Game {
 
     }
 
-    private boolean birdsAreTouching(Bird bird, Bird other) {
+    private boolean birdsAreTouchingVertically(Bird bird, Bird other) {
         for (Coord c1 : bird.body) {
             for (Coord c2 : other.body) {
-                if (c1.manhattanTo(c2) == 1) {
+                if (c1.manhattanTo(c2) == 1 && c1.getX() == c2.getX()) {
                     return true;
                 }
             }
