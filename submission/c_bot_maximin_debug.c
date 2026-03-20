@@ -1291,6 +1291,10 @@ static void merge_scripts(Action* a, const int* sids, const int* scmds, int nscr
     a->n = n + nscript;
 }
 
+/* Team no-progress clock — declared here so choose_action_maximin can read it */
+static int no_progress_turns = 0;
+static int last_my_body = 0;
+
 static SearchResult choose_action_maximin(const State* s, int owner, double deadline_ms) {
     /* Phase 0: Script short birds */
     int script_ids[MAX_BIRDS_PP], script_cmds[MAX_BIRDS_PP], nscript = 0;
@@ -1447,14 +1451,19 @@ static SearchResult choose_action_maximin(const State* s, int owner, double dead
             if (resp_sc[oi] < new_worst) new_worst = resp_sc[oi];
             new_total += resp_sc[oi];
         }
-        /* CVaR3: average of 3 worst responses */
+        /* CVaR3: average of 3 worst responses — scan for 3 minima directly (resp_ord stale after deepening) */
         double cvar3 = new_worst;
         if (nopp >= 3) {
-            /* resp_ord is already sorted ascending, pick bottom 3 */
-            double csum = 0;
-            int cn = 3 < nopp ? 3 : nopp;
-            for (int k = 0; k < cn; k++) csum += resp_sc[resp_ord[k]];
-            cvar3 = csum / cn;
+            double bot[3] = {1e18, 1e18, 1e18};
+            for (int oi2 = 0; oi2 < nopp; oi2++) {
+                double v = resp_sc[oi2];
+                if (v < bot[2]) {
+                    bot[2] = v;
+                    if (bot[2] < bot[1]) { double t = bot[1]; bot[1] = bot[2]; bot[2] = t; }
+                    if (bot[1] < bot[0]) { double t = bot[0]; bot[0] = bot[1]; bot[1] = t; }
+                }
+            }
+            cvar3 = (bot[0] + bot[1] + bot[2]) / 3.0;
         }
         roots[ri].worst = new_worst;
         roots[ri].mean = new_total / nopp;
@@ -1492,6 +1501,50 @@ static SearchResult choose_action_maximin(const State* s, int owner, double dead
         if (roots[i].rank_score > roots[best_ri].rank_score ||
             (roots[i].rank_score == roots[best_ri].rank_score && roots[i].mean > roots[best_ri].mean))
             best_ri = i;
+
+    /* Team-progress stall rescoring: break gravity equilibrium locks */
+    if (no_progress_turns >= 2 && s->grid.napples > 0 && nroots > 1) {
+        /* Check if any enemy head is close (tactical contact) */
+        bool tactical = false;
+        for (int i = 0; i < s->nbirds && !tactical; i++) {
+            if (s->birds[i].owner == owner || !s->birds[i].alive) continue;
+            Coord oh = bird_head(&s->birds[i]);
+            for (int j = 0; j < s->nbirds && !tactical; j++) {
+                if (s->birds[j].owner != owner || !s->birds[j].alive) continue;
+                if (manhattan(oh, bird_head(&s->birds[j])) <= 3) tactical = true;
+            }
+        }
+        if (!tactical) {
+            /* Rescore: penalize stalled actions, bonus progress actions */
+            double delta = EVAL_BODY * 0.4; /* ~48 points — enough to flip Game 1's 38-point gap */
+            double best_rs = roots[best_ri].rank_score;
+            /* For each root within delta of best, check if it makes team progress */
+            int progress_ri = -1;
+            double progress_best = -1e18;
+            for (int ri = 0; ri < nroots; ri++) {
+                if (roots[ri].rank_score < best_rs - delta) continue;
+                /* Simulate this action vs default opp, check if team body improves or apple gets closer */
+                State nx = sim_state(s, owner, &my_acts[roots[ri].idx], &opp_acts[opp_order[0]]);
+                int nbs[2]; body_scores(&nx, nbs);
+                bool ate = (nbs[owner] > last_my_body);
+                /* Check if distinct-apple assignment cost improves */
+                double cur_cov = apple_coverage(s, owner);
+                double nxt_cov = apple_coverage(&nx, owner);
+                bool better_cov = (nxt_cov > cur_cov + 0.01);
+                if (ate || better_cov) {
+                    double adj = roots[ri].rank_score + delta * 0.5; /* progress bonus */
+                    if (adj > progress_best) {
+                        progress_best = adj;
+                        progress_ri = ri;
+                    }
+                }
+            }
+            if (progress_ri >= 0 && progress_ri != best_ri) {
+                best_ri = progress_ri;
+                fprintf(stderr, "STALL: no_prog=%d, override to progress action\n", no_progress_turns);
+            }
+        }
+    }
 
     SearchResult sr;
     sr.action = nroots > 0 ? my_acts[roots[best_ri].idx] : my_acts[0];
@@ -1576,6 +1629,17 @@ int main(void) {
     while (read_frame(&frame)) {
         State state = reconcile(&io, &frame, has_prev ? &prev_state : NULL,
                                 has_prev ? &last_my : NULL);
+        /* Update team no-progress clock */
+        {
+            int bs[2]; body_scores(&state, bs);
+            int my_body = bs[io.player_idx];
+            if (my_body > last_my_body) {
+                no_progress_turns = 0; /* ate an apple */
+            } else {
+                no_progress_turns++;
+            }
+            last_my_body = my_body;
+        }
         double deadline;
         clock_gettime(CLOCK_MONOTONIC, &search_start);
         if (state.turn == 0)
