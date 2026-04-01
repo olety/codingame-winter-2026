@@ -88,5 +88,5 @@ Key finding: **policy priors hurt at <85% accuracy, and value-only integration w
 
 ## Git Remotes
 
-- `origin`: `https://github.com/oneiron-dev/codingame-winter-2026.git`
+- `origin`: `https://github.com/olety/codingame-winter-2026.git`
 - `upstream`: `https://github.com/CodinGame/WinterChallenge2026-Exotec.git`
