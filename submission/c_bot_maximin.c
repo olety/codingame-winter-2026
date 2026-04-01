@@ -21,6 +21,9 @@
 #define MAX_CH 128
 #define MAX_ACTIONS 256
 #define CONTEST_MAX_TURNS 200
+#define IDLE_THRESHOLD 999  /* effectively disabled */
+#define IDLE_ENEMY_DIST 5
+#define BFS_MAX 2048
 #define DIR_N 0
 #define DIR_E 1
 #define DIR_S 2
@@ -196,6 +199,39 @@ static int ordered_cmds(const State* s, int bird_id, int out[5]) {
     }
     return n;
 }
+/* Safety-filtered ordered_cmds for fragile birds (len<=3): reject immediately fatal moves */
+static int ordered_cmds_safe(const State* s, int bird_id, int out[5]) {
+    const Bird* b = NULL;
+    for (int i = 0; i < s->nbirds; i++)
+        if (s->birds[i].id == bird_id && s->birds[i].alive) { b = &s->birds[i]; break; }
+    if (!b || b->len > 3) return ordered_cmds(s, bird_id, out);
+    int raw[5], nraw = ordered_cmds(s, bird_id, raw);
+    int facing = bird_facing(b);
+    Coord head = bird_head(b);
+    int n = 0;
+    for (int ci = 0; ci < nraw; ci++) {
+        int cmd = raw[ci];
+        int dir = (cmd == -1) ? facing : cmd;
+        if (dir < 0 || dir > 3) continue;
+        Coord nh = coord_add(head, dir_delta(dir));
+        if (!grid_valid(&s->grid, nh) || s->grid.walls[nh.y][nh.x]) continue;
+        bool body_hit = false;
+        for (int j = 0; j < s->nbirds && !body_hit; j++) {
+            if (!s->birds[j].alive) continue;
+            if (s->birds[j].id == bird_id) {
+                for (int k = 1; k < b->len; k++)
+                    if (bird_seg(b, k).x == nh.x && bird_seg(b, k).y == nh.y) { body_hit = true; break; }
+            } else if (bird_contains(&s->birds[j], nh)) body_hit = true;
+        }
+        if (body_hit) continue;
+        out[n++] = cmd;
+    }
+    if (n == 0) { /* all fatal — keep all for graceful degradation */
+        for (int ci = 0; ci < nraw; ci++) out[ci] = raw[ci];
+        return nraw;
+    }
+    return n;
+}
 static int enum_joint_for_ids(const State* s, const int* bids, int nb, Action* out, int max_actions) {
     if (nb == 0) {
         out[0].n = 0;
@@ -204,6 +240,31 @@ static int enum_joint_for_ids(const State* s, const int* bids, int nb, Action* o
     int cmds[MAX_BIRDS_PP][5], ncmds[MAX_BIRDS_PP];
     for (int i = 0; i < nb; i++)
         ncmds[i] = ordered_cmds(s, bids[i], cmds[i]);
+    int total = 1;
+    for (int i = 0; i < nb; i++) total *= ncmds[i];
+    if (total > max_actions) total = max_actions;
+    int idx[MAX_BIRDS_PP];
+    memset(idx, 0, sizeof(idx));
+    for (int a = 0; a < total; a++) {
+        out[a].n = nb;
+        for (int i = 0; i < nb; i++) {
+            out[a].bird_id[i] = bids[i];
+            out[a].cmd[i] = cmds[i][idx[i]];
+        }
+        for (int i = nb - 1; i >= 0; i--) {
+            idx[i]++;
+            if (idx[i] < ncmds[i]) break;
+            idx[i] = 0;
+        }
+    }
+    return total;
+}
+/* Like enum_joint_for_ids but uses safety-filtered cmds for fragile birds */
+static int enum_joint_for_ids_safe(const State* s, const int* bids, int nb, Action* out, int max_actions) {
+    if (nb == 0) { out[0].n = 0; return 1; }
+    int cmds[MAX_BIRDS_PP][5], ncmds[MAX_BIRDS_PP];
+    for (int i = 0; i < nb; i++)
+        ncmds[i] = ordered_cmds_safe(s, bids[i], cmds[i]);
     int total = 1;
     for (int i = 0; i < nb; i++) total *= ncmds[i];
     if (total > max_actions) total = max_actions;
@@ -242,13 +303,24 @@ static bool body_in_list(const Coord* body, int len, Coord c) {
         if (body[i].x == c.x && body[i].y == c.y) return true;
     return false;
 }
-static bool solid_under(const State* s, Coord c, const Coord* ignore, int nignore) {
+/* Check if there's a wall or apple directly below coord (NOT checking other birds) */
+static bool has_tile_or_apple_under(const State* s, Coord c) {
     Coord below = coord(c.x, c.y + 1);
-    if (body_in_list(ignore, nignore, below)) return false;
     if (grid_valid(&s->grid, below) && s->grid.walls[below.y][below.x]) return true;
-    for (int i = 0; i < s->nbirds; i++)
-        if (s->birds[i].alive && bird_contains(&s->birds[i], below)) return true;
     if (apple_index(&s->grid, below) >= 0) return true;
+    return false;
+}
+/* Check if coord is grounded (tile/apple under, bottom of map, or grounded bird under) */
+static bool is_grounded(const State* s, Coord c, const bool* grounded_birds) {
+    if (has_tile_or_apple_under(s, c)) return true;
+    Coord below = coord(c.x, c.y + 1);
+    /* Bottom of map = grounded */
+    if (!grid_valid(&s->grid, below)) return true;
+    /* Check grounded birds */
+    for (int i = 0; i < s->nbirds; i++) {
+        if (!s->birds[i].alive || !grounded_birds[i]) continue;
+        if (bird_contains(&s->birds[i], below)) return true;
+    }
     return false;
 }
 static void shift_bird_down(Bird* b) {
@@ -262,41 +334,82 @@ static int collect_body(const Bird* b, Coord* out) {
         out[i] = bird_seg(b, i);
     return b->len;
 }
-static bool apply_individual_falls(State* s) {
-    bool moved = false;
-    Coord buf[MAX_BODY];
+/* Phase 1: Grounding flood-fill + airborne fall */
+static bool apply_falls_new(State* s) {
+    bool something_fell = false;
+    bool airborne[MAX_BIRDS];
+    bool grounded[MAX_BIRDS];
+    /* Start: all live birds are airborne */
     for (int i = 0; i < s->nbirds; i++) {
-        if (!s->birds[i].alive) continue;
-        int n = collect_body(&s->birds[i], buf);
-        bool can_fall = true;
-        for (int j = 0; j < n; j++)
-            if (solid_under(s, buf[j], buf, n)) { can_fall = false; break; }
-        if (can_fall) {
-            moved = true;
-            shift_bird_down(&s->birds[i]);
-            bool all_off = true;
-            for (int j = 0; j < s->birds[i].len; j++)
-                if (bird_seg(&s->birds[i], j).y < s->grid.h + 1) { all_off = false; break; }
-            if (all_off) s->birds[i].alive = false;
+        airborne[i] = s->birds[i].alive;
+        grounded[i] = false;
+    }
+    /* Grounding flood-fill */
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int i = 0; i < s->nbirds; i++) {
+            if (!airborne[i]) continue;
+            /* Check if any segment is grounded */
+            bool is_gnd = false;
+            for (int j = 0; j < s->birds[i].len && !is_gnd; j++) {
+                Coord seg = bird_seg(&s->birds[i], j);
+                if (is_grounded(s, seg, grounded)) is_gnd = true;
+            }
+            if (is_gnd) {
+                airborne[i] = false;
+                grounded[i] = true;
+                changed = true;
+            }
         }
     }
-    return moved;
+    /* Fall: all remaining airborne birds fall 1 row */
+    for (int i = 0; i < s->nbirds; i++) {
+        if (!airborne[i]) continue;
+        something_fell = true;
+        shift_bird_down(&s->birds[i]);
+        /* Check out of bounds: ALL segments y >= height+1 */
+        bool all_off = true;
+        for (int j = 0; j < s->birds[i].len; j++)
+            if (bird_seg(&s->birds[i], j).y < s->grid.h + 1) { all_off = false; break; }
+        if (all_off) s->birds[i].alive = false;
+    }
+    return something_fell;
 }
-static bool birds_touching(const Bird* a, const Bird* b) {
+/* Vertical-only adjacency: manhattan==1 AND same x-coordinate */
+static bool birds_touching_vertically(const Bird* a, const Bird* b) {
     for (int i = 0; i < a->len; i++)
-        for (int j = 0; j < b->len; j++)
-            if (manhattan(bird_seg(a, i), bird_seg(b, j)) == 1) return true;
+        for (int j = 0; j < b->len; j++) {
+            Coord sa = bird_seg(a, i), sb = bird_seg(b, j);
+            if (sa.x == sb.x && manhattan(sa, sb) == 1) return true;
+        }
     return false;
 }
+/* Phase 2: Intercoiled falls — groups of vertically-touching birds */
 static bool apply_intercoiled_falls(State* s) {
     bool moved = false;
     bool seen[MAX_BIRDS];
     memset(seen, 0, sizeof(seen));
-    int alive_idx[MAX_BIRDS], nalive = 0;
-    for (int i = 0; i < s->nbirds; i++)
-        if (s->birds[i].alive) alive_idx[nalive++] = i;
-    for (int start = 0; start < nalive; start++) {
-        int si = alive_idx[start];
+    /* Filter: only birds where NO segment has tile/apple below */
+    bool eligible[MAX_BIRDS];
+    int eligible_idx[MAX_BIRDS], neligible = 0;
+    for (int i = 0; i < s->nbirds; i++) {
+        eligible[i] = false;
+        if (!s->birds[i].alive) continue;
+        bool has_support = false;
+        for (int j = 0; j < s->birds[i].len; j++) {
+            if (has_tile_or_apple_under(s, bird_seg(&s->birds[i], j))) {
+                has_support = true;
+                break;
+            }
+        }
+        if (!has_support) {
+            eligible[i] = true;
+            eligible_idx[neligible++] = i;
+        }
+    }
+    for (int start = 0; start < neligible; start++) {
+        int si = eligible_idx[start];
         if (seen[si]) continue;
         int group[MAX_BIRDS], ng = 0;
         int queue[MAX_BIRDS], qh = 0, qt = 0;
@@ -306,14 +419,15 @@ static bool apply_intercoiled_falls(State* s) {
             if (seen[cur]) continue;
             seen[cur] = true;
             group[ng++] = cur;
-            for (int j = 0; j < nalive; j++) {
-                int oi = alive_idx[j];
+            for (int j = 0; j < neligible; j++) {
+                int oi = eligible_idx[j];
                 if (cur == oi || seen[oi]) continue;
-                if (birds_touching(&s->birds[cur], &s->birds[oi]))
+                if (birds_touching_vertically(&s->birds[cur], &s->birds[oi]))
                     queue[qt++] = oi;
             }
         }
         if (ng <= 1) continue;
+        /* Check if any segment in the group sits on a non-group bird */
         Coord meta[MAX_BIRDS * MAX_BODY];
         int nm = 0;
         for (int i = 0; i < ng; i++) {
@@ -322,24 +436,32 @@ static bool apply_intercoiled_falls(State* s) {
                 meta[nm++] = bird_seg(b, j);
         }
         bool can_fall = true;
-        for (int i = 0; i < nm; i++)
-            if (solid_under(s, meta[i], meta, nm)) { can_fall = false; break; }
+        for (int mi = 0; mi < nm && can_fall; mi++) {
+            Coord below = coord(meta[mi].x, meta[mi].y + 1);
+            if (body_in_list(meta, nm, below)) continue;
+            for (int bi = 0; bi < s->nbirds; bi++) {
+                if (!s->birds[bi].alive) continue;
+                if (bird_contains(&s->birds[bi], below)) { can_fall = false; break; }
+            }
+        }
         if (!can_fall) continue;
         moved = true;
         for (int i = 0; i < ng; i++) {
             shift_bird_down(&s->birds[group[i]]);
-            if (bird_head(&s->birds[group[i]]).y >= s->grid.h)
-                s->birds[group[i]].alive = false;
+            /* Out-of-bounds: ALL segments y >= height+1 */
+            bool all_off = true;
+            for (int j = 0; j < s->birds[group[i]].len; j++)
+                if (bird_seg(&s->birds[group[i]], j).y < s->grid.h + 1) { all_off = false; break; }
+            if (all_off) s->birds[group[i]].alive = false;
         }
     }
     return moved;
 }
 static void apply_falls(State* s) {
-    bool something = true;
-    while (something) {
-        something = false;
-        while (apply_individual_falls(s)) something = true;
-        if (apply_intercoiled_falls(s)) something = true;
+    bool fell = true;
+    while (fell) {
+        fell = apply_falls_new(s);       /* grounding flood-fill + airborne fall */
+        fell |= apply_intercoiled_falls(s); /* updated intercoiled */
     }
 }
 static void step(State* s, const Action* p0, const Action* p1) {
@@ -724,17 +846,35 @@ static double support_stability(const State* s, int owner) {
 static double breakpoint_sc(const State* s, int owner) {
     return (double)(break_count(s, owner) - break_count(s, 1 - owner));
 }
+/* Turn-distance: Manhattan + penalty for facing wrong direction */
+static int turn_distance(Coord head, int facing, Coord target) {
+    int md = manhattan(head, target);
+    if (facing < 0 || facing > 3 || md == 0) return md;
+    int dx = target.x - head.x;
+    int dy = target.y - head.y;
+    int tdx = (dx > 0) ? 1 : (dx < 0) ? -1 : 0;
+    int tdy = (dy > 0) ? 1 : (dy < 0) ? -1 : 0;
+    int dot = DX[facing] * tdx + DY[facing] * tdy;
+    if (dot < 0) return md + 2; /* facing opposite */
+    if (dot == 0) return md + 1; /* perpendicular */
+    return md;
+}
 /* Distinct-apple coverage: reward spreading birds across different apples */
 static double apple_coverage(const State* s, int owner) {
-    /* Greedy assignment: for each side, assign birds to distinct nearest apples */
+    /* Greedy assignment: for each side, assign birds to distinct nearest apples.
+       Uses turn_distance (facing-aware) for better opening coordination. */
     double my_sc = 0, opp_sc = 0;
     for (int side = 0; side < 2; side++) {
         int p = (side == 0) ? owner : 1 - owner;
         Coord heads[MAX_BIRDS_PP];
+        int facings[MAX_BIRDS_PP];
         int nh = 0;
         for (int i = 0; i < s->nbirds; i++)
-            if (s->birds[i].owner == p && s->birds[i].alive && nh < MAX_BIRDS_PP)
-                heads[nh++] = bird_head(&s->birds[i]);
+            if (s->birds[i].owner == p && s->birds[i].alive && nh < MAX_BIRDS_PP) {
+                heads[nh] = bird_head(&s->birds[i]);
+                facings[nh] = bird_facing(&s->birds[i]);
+                nh++;
+            }
         if (nh == 0 || s->grid.napples == 0) continue;
         bool bird_used[MAX_BIRDS_PP] = {false};
         bool apple_used[MAX_APPLES] = {false};
@@ -746,7 +886,7 @@ static double apple_coverage(const State* s, int owner) {
                 if (bird_used[b]) continue;
                 for (int a = 0; a < s->grid.napples; a++) {
                     if (apple_used[a]) continue;
-                    int d = manhattan(heads[b], s->grid.apples[a]);
+                    int d = turn_distance(heads[b], facings[b], s->grid.apples[a]);
                     if (d < best_d) { best_d = d; best_b = b; best_a = a; }
                 }
             }
@@ -1295,20 +1435,142 @@ static void merge_scripts(Action* a, const int* sids, const int* scmds, int nscr
 static int no_progress_turns = 0;
 static int last_my_body = 0;
 
-static SearchResult choose_action_maximin(const State* s, int owner, double deadline_ms) {
-    /* Phase 0: Script short birds */
-    int script_ids[MAX_BIRDS_PP], script_cmds[MAX_BIRDS_PP], nscript = 0;
-    int search_ids[MAX_BIRDS_PP], nsearch = 0;
-    for (int i = 0; i < s->nbirds; i++) {
-        if (s->birds[i].owner != owner || !s->birds[i].alive) continue;
-        if (s->birds[i].len <= SHORT_THRESHOLD) {
-            script_ids[nscript] = s->birds[i].id;
-            script_cmds[nscript] = script_short_bird(s, &s->birds[i]);
-            nscript++;
-        } else {
-            if (nsearch < MAX_BIRDS_PP) search_ids[nsearch++] = s->birds[i].id;
+/* Per-bird idle tracking (indexed by bird id) */
+static int bird_idle_turns[MAX_BIRDS];
+static int bird_last_apple_dist[MAX_BIRDS];
+
+/* BFS to nearest apple from bird head, respecting walls and facing direction.
+   Returns first command to take (-1=keep, 0-3=dir), or -2 if no path.
+   Simplified gravity: position safe if wall/apple below or at floor. */
+typedef struct { int x, y, dir; } BFSKey;
+static int bfs_to_apple(const State* s, const Bird* b, int* out_dist) {
+    *out_dist = 9999;
+    Coord head = bird_head(b);
+    int facing = bird_facing(b);
+    static int8_t visited[MAX_H][MAX_W][5]; /* [y][x][dir] */
+    memset(visited, 0, sizeof(visited));
+    /* BFS queue: pos, facing dir, distance, first command taken */
+    static int qx[BFS_MAX], qy[BFS_MAX], qdir[BFS_MAX], qdist[BFS_MAX], qfcmd[BFS_MAX];
+    int qh = 0, qt = 0;
+    /* Seed: current head + facing */
+    if (facing == DIR_UNSET) {
+        /* Can go any of 4 directions */
+        for (int d = 0; d < 4; d++) {
+            Coord nh = coord_add(head, dir_delta(d));
+            if (!grid_valid(&s->grid, nh) || s->grid.walls[nh.y][nh.x]) continue;
+            /* No gravity check — idle birds need to move even through unsupported tiles */
+            if (visited[nh.y][nh.x][d]) continue;
+            visited[nh.y][nh.x][d] = 1;
+            /* Check if apple reached */
+            if (apple_index(&s->grid, nh) >= 0) {
+                *out_dist = 1;
+                return d;
+            }
+            if (qt < BFS_MAX) {
+                qx[qt]=nh.x; qy[qt]=nh.y; qdir[qt]=d; qdist[qt]=1; qfcmd[qt]=d;
+                qt++;
+            }
+        }
+    } else {
+        /* Try: keep(-1), turn_left, turn_right */
+        int try_dirs[3]; int ntry = 0;
+        try_dirs[ntry++] = facing; /* keep = -1, but effective dir is facing */
+        try_dirs[ntry++] = turn_left(facing);
+        try_dirs[ntry++] = turn_right(facing);
+        int try_cmds[3] = {-1, turn_left(facing), turn_right(facing)};
+        for (int t = 0; t < ntry; t++) {
+            int d = try_dirs[t];
+            Coord nh = coord_add(head, dir_delta(d));
+            if (!grid_valid(&s->grid, nh) || s->grid.walls[nh.y][nh.x]) continue;
+            if (visited[nh.y][nh.x][d]) continue;
+            visited[nh.y][nh.x][d] = 1;
+            if (apple_index(&s->grid, nh) >= 0) {
+                *out_dist = 1;
+                return try_cmds[t];
+            }
+            if (qt < BFS_MAX) {
+                qx[qt]=nh.x; qy[qt]=nh.y; qdir[qt]=d; qdist[qt]=1; qfcmd[qt]=try_cmds[t];
+                qt++;
+            }
         }
     }
+    /* BFS loop */
+    while (qh < qt) {
+        int cx=qx[qh], cy=qy[qh], cd=qdir[qh], cdist=qdist[qh], cfcmd=qfcmd[qh];
+        qh++;
+        /* Try: keep(cd), turn_left(cd), turn_right(cd) */
+        int try_dirs[3] = {cd, turn_left(cd), turn_right(cd)};
+        for (int t = 0; t < 3; t++) {
+            int nd = try_dirs[t];
+            Coord nh = coord(cx + DX[nd], cy + DY[nd]);
+            if (!grid_valid(&s->grid, nh) || s->grid.walls[nh.y][nh.x]) continue;
+            if (visited[nh.y][nh.x][nd]) continue;
+            visited[nh.y][nh.x][nd] = 1;
+            if (apple_index(&s->grid, nh) >= 0) {
+                *out_dist = cdist + 1;
+                return cfcmd;
+            }
+            if (qt < BFS_MAX) {
+                qx[qt]=nh.x; qy[qt]=nh.y; qdir[qt]=nd; qdist[qt]=cdist+1; qfcmd[qt]=cfcmd;
+                qt++;
+            }
+        }
+    }
+    return -2; /* no path found */
+}
+
+/* Nearest enemy head distance to a bird */
+static int nearest_enemy_dist(const State* s, const Bird* b) {
+    Coord h = bird_head(b);
+    int best = 9999;
+    for (int i = 0; i < s->nbirds; i++) {
+        if (!s->birds[i].alive || s->birds[i].owner == b->owner) continue;
+        int d = manhattan(h, bird_head(&s->birds[i]));
+        if (d < best) best = d;
+    }
+    return best;
+}
+
+/* Nearest apple manhattan distance from bird head */
+static int nearest_apple_dist(const State* s, const Bird* b) {
+    Coord h = bird_head(b);
+    int best = 9999;
+    for (int a = 0; a < s->grid.napples; a++) {
+        int d = manhattan(h, s->grid.apples[a]);
+        if (d < best) best = d;
+    }
+    return best;
+}
+
+static SearchResult choose_action_maximin(const State* s, int owner, double deadline_ms) {
+    /* Phase 0: Classify birds — short, idle, or search */
+    int script_ids[MAX_BIRDS_PP], script_cmds[MAX_BIRDS_PP], nscript = 0;
+    int search_ids[MAX_BIRDS_PP], nsearch = 0;
+    int bfs_dist_for[MAX_BIRDS], bfs_cmd_for[MAX_BIRDS];
+    int n_idle = 0;
+    memset(bfs_dist_for, 0x7f, sizeof(bfs_dist_for));
+    memset(bfs_cmd_for, 0, sizeof(bfs_cmd_for));
+    for (int i = 0; i < s->nbirds; i++) {
+        if (s->birds[i].owner != owner || !s->birds[i].alive) continue;
+        int bid = s->birds[i].id;
+        if (s->birds[i].len <= SHORT_THRESHOLD && SHORT_THRESHOLD > 0) {
+            script_ids[nscript] = bid;
+            script_cmds[nscript] = script_short_bird(s, &s->birds[i]);
+            nscript++;
+        } else if (bird_idle_turns[bid] >= IDLE_THRESHOLD) {
+            /* Idle bird: compute BFS suggestion but keep in search for safety */
+            int bfs_dist;
+            int bfs_cmd = bfs_to_apple(s, &s->birds[i], &bfs_dist);
+            bfs_dist_for[bid] = bfs_dist;
+            bfs_cmd_for[bid] = bfs_cmd;
+            n_idle++;
+            if (nsearch < MAX_BIRDS_PP) search_ids[nsearch++] = bid;
+        } else {
+            if (nsearch < MAX_BIRDS_PP) search_ids[nsearch++] = bid;
+        }
+    }
+
+    /* (team freeze handled by BFS-guided stall hook below) */
 
     /* Phase 1: Enumerate my joint actions (search birds + merge scripts) */
     Action my_acts[MAX_ACTIONS];
@@ -1318,7 +1580,7 @@ static SearchResult choose_action_maximin(const State* s, int owner, double dead
         my_acts[0].n = 0;
         merge_scripts(&my_acts[0], script_ids, script_cmds, nscript);
     } else {
-        nmy = enum_joint_for_ids(s, search_ids, nsearch, my_acts, MAX_ACTIONS);
+        nmy = enum_joint_for_ids_safe(s, search_ids, nsearch, my_acts, MAX_ACTIONS);
         for (int a = 0; a < nmy; a++)
             merge_scripts(&my_acts[a], script_ids, script_cmds, nscript);
     }
@@ -1353,6 +1615,12 @@ static SearchResult choose_action_maximin(const State* s, int owner, double dead
             if (bi >= 0) opp_repr[nrepr++] = bi;
         }
     }
+    /* Detect opening: all birds len ≤ 4, early turns */
+    bool is_opening = (s->turn <= 5);
+    if (is_opening) {
+        for (int i = 0; i < s->nbirds; i++)
+            if (s->birds[i].alive && s->birds[i].len > 4) { is_opening = false; break; }
+    }
     double my_prior[MAX_ACTIONS];
     int my_order[MAX_ACTIONS];
     for (int a = 0; a < nmy; a++) {
@@ -1362,6 +1630,42 @@ static SearchResult choose_action_maximin(const State* s, int owner, double dead
             sum += evaluate(&nx, owner);
         }
         my_prior[a] = sum / nrepr;
+        /* Opening spread bonus: absolute coverage quality for MY birds (not differential).
+           On symmetric maps, the differential coverage is ~0, but absolute spread still varies. */
+        if (is_opening) {
+            State nx = sim_state(s, owner, &my_acts[a], &opp_acts[0]);
+            Coord heads[MAX_BIRDS_PP];
+            int facings[MAX_BIRDS_PP];
+            int nh = 0;
+            for (int i = 0; i < nx.nbirds; i++)
+                if (nx.birds[i].owner == owner && nx.birds[i].alive && nh < MAX_BIRDS_PP) {
+                    heads[nh] = bird_head(&nx.birds[i]);
+                    facings[nh] = bird_facing(&nx.birds[i]);
+                    nh++;
+                }
+            if (nh > 1 && nx.grid.napples > 0) {
+                bool bird_used[MAX_BIRDS_PP] = {false};
+                bool apple_used[MAX_APPLES] = {false};
+                double spread = 0;
+                int nassign = nh < nx.grid.napples ? nh : nx.grid.napples;
+                for (int k = 0; k < nassign; k++) {
+                    int best_b = -1, best_a = -1, best_d = 9999;
+                    for (int b = 0; b < nh; b++) {
+                        if (bird_used[b]) continue;
+                        for (int ai = 0; ai < nx.grid.napples; ai++) {
+                            if (apple_used[ai]) continue;
+                            int d = turn_distance(heads[b], facings[b], nx.grid.apples[ai]);
+                            if (d < best_d) { best_d = d; best_b = b; best_a = ai; }
+                        }
+                    }
+                    if (best_b < 0) break;
+                    bird_used[best_b] = true;
+                    apple_used[best_a] = true;
+                    spread += 1.0 / (double)(best_d + 1);
+                }
+                my_prior[a] += EVAL_COVERAGE * spread; /* ~40 * spread as ordering bonus */
+            }
+        }
         my_order[a] = a;
     }
     sort_desc(my_order, my_prior, nmy);
@@ -1384,7 +1688,7 @@ static SearchResult choose_action_maximin(const State* s, int owner, double dead
     int pairs = 0, cutoffs = 0;
 
     for (int mi = 0; mi < nmy; mi++) {
-        if ((mi & 3) == 0 && expired(deadline_ms)) break;
+        if (mi > 0 && (mi & 3) == 0 && expired(deadline_ms)) break;
         int a = my_order[mi];
         double worst = 1e18, total = 0;
         int eval_count = 0;
@@ -1502,47 +1806,34 @@ static SearchResult choose_action_maximin(const State* s, int owner, double dead
             (roots[i].rank_score == roots[best_ri].rank_score && roots[i].mean > roots[best_ri].mean))
             best_ri = i;
 
-    /* Team-progress stall rescoring: break gravity equilibrium locks */
-    if (no_progress_turns >= 2 && s->grid.napples > 0 && nroots > 1) {
-        /* Check if any enemy head is close (tactical contact) */
-        bool tactical = false;
-        for (int i = 0; i < s->nbirds && !tactical; i++) {
-            if (s->birds[i].owner == owner || !s->birds[i].alive) continue;
-            Coord oh = bird_head(&s->birds[i]);
-            for (int j = 0; j < s->nbirds && !tactical; j++) {
-                if (s->birds[j].owner != owner || !s->birds[j].alive) continue;
-                if (manhattan(oh, bird_head(&s->birds[j])) <= 3) tactical = true;
+    /* BFS-guided stall override: when idle birds exist, prefer actions matching BFS */
+    if (n_idle > 0 && s->grid.napples > 0 && nroots > 1) {
+        double delta = EVAL_BODY * 0.5; /* score tolerance for BFS override */
+        double best_rs = roots[best_ri].rank_score;
+        int bfs_ri = -1;
+        double bfs_best = -1e18;
+        for (int ri = 0; ri < nroots; ri++) {
+            if (roots[ri].rank_score < best_rs - delta) continue;
+            /* Score: how many idle birds' commands match their BFS suggestion */
+            int a = roots[ri].idx;
+            double bfs_match = 0;
+            for (int bi = 0; bi < my_acts[a].n; bi++) {
+                int bid = my_acts[a].bird_id[bi];
+                if (bird_idle_turns[bid] < IDLE_THRESHOLD) continue;
+                int cmd = my_acts[a].cmd[bi];
+                int want = bfs_cmd_for[bid];
+                if (want == -2) continue; /* no BFS path */
+                if (cmd == want) bfs_match += 2.0;
+                else if (cmd != -1) bfs_match += 0.5; /* at least moving */
+            }
+            if (bfs_match > 0) {
+                double adj = roots[ri].rank_score + bfs_match * 20.0;
+                if (adj > bfs_best) { bfs_best = adj; bfs_ri = ri; }
             }
         }
-        if (!tactical) {
-            /* Rescore: penalize stalled actions, bonus progress actions */
-            double delta = EVAL_BODY * 0.4; /* ~48 points — enough to flip Game 1's 38-point gap */
-            double best_rs = roots[best_ri].rank_score;
-            /* For each root within delta of best, check if it makes team progress */
-            int progress_ri = -1;
-            double progress_best = -1e18;
-            for (int ri = 0; ri < nroots; ri++) {
-                if (roots[ri].rank_score < best_rs - delta) continue;
-                /* Simulate this action vs default opp, check if team body improves or apple gets closer */
-                State nx = sim_state(s, owner, &my_acts[roots[ri].idx], &opp_acts[opp_order[0]]);
-                int nbs[2]; body_scores(&nx, nbs);
-                bool ate = (nbs[owner] > last_my_body);
-                /* Check if distinct-apple assignment cost improves */
-                double cur_cov = apple_coverage(s, owner);
-                double nxt_cov = apple_coverage(&nx, owner);
-                bool better_cov = (nxt_cov > cur_cov + 0.01);
-                if (ate || better_cov) {
-                    double adj = roots[ri].rank_score + delta * 0.5; /* progress bonus */
-                    if (adj > progress_best) {
-                        progress_best = adj;
-                        progress_ri = ri;
-                    }
-                }
-            }
-            if (progress_ri >= 0 && progress_ri != best_ri) {
-                best_ri = progress_ri;
-                fprintf(stderr, "STALL: no_prog=%d, override to progress action\n", no_progress_turns);
-            }
+        if (bfs_ri >= 0 && bfs_ri != best_ri) {
+            best_ri = bfs_ri;
+            fprintf(stderr, "BFS_STALL: n_idle=%d override to bfs-matching action\n", n_idle);
         }
     }
 
@@ -1595,10 +1886,11 @@ static SearchResult choose_action_maximin(const State* s, int owner, double dead
         int bs2[2]; body_scores(s, bs2);
         double bd2 = (double)(bs2[owner] - bs2[1 - owner]);
         double ld2 = (double)(s->losses[1 - owner] - s->losses[owner]);
-        fprintf(stderr, "  EVAL: body=%.0f loss=%.0f mob=%.1f apple=%.1f stab=%.1f brk=%.1f frag=%.1f dng=%.1f grav=%.1f\n",
+        fprintf(stderr, "  EVAL: body=%.0f loss=%.0f mob=%.1f apple=%.1f cov=%.1f stab=%.1f brk=%.1f frag=%.1f dng=%.1f grav=%.1f\n",
                 EVAL_BODY * bd2, EVAL_LOSS * ld2,
                 EVAL_MOBILITY * mobility_score(s, owner),
                 EVAL_APPLE * apple_race(s, owner),
+                EVAL_COVERAGE * apple_coverage(s, owner),
                 EVAL_STABILITY * support_stability(s, owner),
                 EVAL_BREAKPOINT * breakpoint_sc(s, owner),
                 EVAL_FRAGILE * fragile_attack(s, owner),
@@ -1622,6 +1914,8 @@ int main(void) {
     read_init(&io);
     nn_enabled = (CNN_CH1 > 0);
     srand(42);
+    memset(bird_idle_turns, 0, sizeof(bird_idle_turns));
+    for (int i = 0; i < MAX_BIRDS; i++) bird_last_apple_dist[i] = -1;
     State prev_state;
     Action last_my = empty_action();
     bool has_prev = false;
@@ -1634,11 +1928,43 @@ int main(void) {
             int bs[2]; body_scores(&state, bs);
             int my_body = bs[io.player_idx];
             if (my_body > last_my_body) {
-                no_progress_turns = 0; /* ate an apple */
+                no_progress_turns = 0;
             } else {
                 no_progress_turns++;
             }
             last_my_body = my_body;
+        }
+        /* Update per-bird idle tracking */
+        for (int i = 0; i < state.nbirds; i++) {
+            if (state.birds[i].owner != io.player_idx || !state.birds[i].alive) continue;
+            int bid = state.birds[i].id;
+            int adist = nearest_apple_dist(&state, &state.birds[i]);
+            bool progress = false;
+            /* Check if bird ate: head is where an apple used to be (body grew) */
+            if (has_prev) {
+                /* Find this bird in prev state, compare lengths */
+                for (int j = 0; j < prev_state.nbirds; j++) {
+                    if (prev_state.birds[j].id == bid && prev_state.birds[j].alive) {
+                        if (state.birds[i].len > prev_state.birds[j].len) progress = true;
+                        break;
+                    }
+                }
+            }
+            /* Apple dist decreased */
+            if (bird_last_apple_dist[bid] >= 0 && adist < bird_last_apple_dist[bid])
+                progress = true;
+            /* Enemy head within manhattan 5 */
+            if (nearest_enemy_dist(&state, &state.birds[i]) <= 5)
+                progress = true;
+            if (progress) bird_idle_turns[bid] = 0;
+            else bird_idle_turns[bid]++;
+            bird_last_apple_dist[bid] = adist;
+#if DEBUG_VERBOSE
+            if (bird_idle_turns[bid] >= 3)
+                fprintf(stderr, "  bird%d idle=%d adist=%d edist=%d\n",
+                        bid, bird_idle_turns[bid], adist,
+                        nearest_enemy_dist(&state, &state.birds[i]));
+#endif
         }
         double deadline;
         clock_gettime(CLOCK_MONOTONIC, &search_start);

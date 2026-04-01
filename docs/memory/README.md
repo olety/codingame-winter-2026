@@ -1,6 +1,6 @@
 # Memory Index
 
-Start here for repo-local memory.
+Start here for repo-local memory. For the full post-mortem, see [../RETROSPECTIVE.md](../RETROSPECTIVE.md).
 
 ## Current entry points
 

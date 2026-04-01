@@ -145,6 +145,8 @@ Useful headline themes:
 - “Distilling 2.5M parameters into a 138KB model that runs in 2ms”
 - “Unicode encoding trick: 2.6× more neural net per character”
 - “How we fit a 24-channel CNN into a 100K character source file”
+- “Muon optimizer: 10% better on every metric, no hyperparameter tuning”
+- “Variable board sizes: when your training data has two shapes and your DataLoader explodes”
 
 ## Architecture evolution (2026-03-13)
 
@@ -165,6 +167,46 @@ Key changes committed in the distillation pipeline batch:
 13. **f16 quantization**: f32→f16 halves weight bytes. Combined with Unicode BMP: 1 char per weight (5.3× denser than base64). Enables 32ch/3L (91K chars) within 100K limit.
 14. **CodinGame has numpy 1.23.2**: Python 3.11, scipy 1.9.3 available. 64×64 matmul at 0.20ms/call. Enables Python-based NN bot with ~5K code + ~95K weight budget → 96ch/3L model.
 15. **Strategic pivot to dual-path**: Rust (search + 32ch NN) AND Python (pure 96ch NN + numpy). Both distilled from a much larger 512ch/16-block teacher trained on 20K seeds (4.6M positions) with Muon optimizer. Self-play data generated free on local compute fleet (Contabo VPS + Mac Mini M4).
+
+## Phase B: Muon vs AdamW A/B test (2026-03-14)
+
+### Setup
+- 2× A100 40GB on Modal, parallel training
+- 128ch/8-block SE teacher, 20 epochs, batch 256
+- 103K samples from 2K merged self-play seeds
+- One arm AdamW (LR=3e-4), one arm Muon (LR=0.02)
+
+### Results — Muon wins decisively
+
+| Metric | AdamW | Muon | Delta |
+|--------|-------|------|-------|
+| Val MAE | 0.3288 | **0.2976** | -9.5% |
+| Val Correlation | 0.4102 | **0.4551** | +10.9% |
+| Val Policy Acc | 67.97% | **74.98%** | +10.3% |
+| Wallclock | 60min | 68min | +13% |
+
+Muon beats AdamW on every metric. The train losses show even larger gaps (Muon train policy loss 0.007 vs AdamW 0.059), suggesting Muon fits harder. Slightly slower (~8min) but irrelevant given the quality gain.
+
+### Variable map sizes discovered
+
+During the A/B test, collation crashes revealed the game has **variable board sizes**:
+- Upstream `GridMaker.java`: height ∈ [10, 24], width = round(height × 1.8) forced even
+- Legend league skew=0.3 biases toward large maps
+- Self-play data: 56% at (19,22,40) and 44% at (19,23,42)
+
+Fix: zero-pad all grids to max size (19, 24, 44) in both Python training and Rust inference. Models use `AdaptiveAvgPool2d(1)` / global average pool, so they handle any spatial dimension — but padding must match between training and inference for consistent pooling denominators.
+
+### Debugging gauntlet
+
+The A/B test required fixing several issues before succeeding:
+1. **Modal build conflict** — local selfplay workers writing to `data/` during Modal snapshot → added `"data"` to `IGNORED_TOP_LEVEL`
+2. **Thread conflict with `app.run()`** — two threads each calling `app.run()` on same global app → rewrote to single `app.run()` with `.spawn()` for parallel jobs
+3. **74 corrupt JSONL lines** — seeds caught mid-write during merge on Contabo → added `try/except json.JSONDecodeError: continue`
+4. **Tensor size mismatch** — variable map sizes in same batch → shape filtering (interim), then zero-padding (final fix)
+5. **Ragged array within sample** — some samples with inconsistent inner dimensions → `torch.tensor()` validation at load time
+
+### Decision
+Muon is confirmed as the optimizer for all future teacher training. Phase C (512ch/16-block on full 60K+ seed dataset) will use Muon.
 
 ## What to append next
 

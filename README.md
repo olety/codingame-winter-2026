@@ -1,127 +1,92 @@
-# Codingame Winter 2026 Bot
+# CodinGame Winter Challenge 2026 — Exotec
 
-This repository contains a local development stack for the CodinGame Winter Challenge 2026 snakebot game.
+**Final result: Silver ~73rd-124th / 1,107 in league (508-578th / 2,161 global)**
 
-Current status:
+A snake-like bird game bot for the [CodinGame Winter Challenge 2026](https://www.codingame.com/contests/winter-challenge-2026). The final submission is a pure C maximin heuristic bot — no neural network, no learned weights.
 
-- Java-parity Rust simulator
-- Rust contest bot with embedded submission config and corrected depth-2 refinement
-- release-mode Rust arena harness with frozen seed suites
-- Java-referee smoke canary that validates the built candidate artifact and behavior hashes
-- staged release-mode search sweep helper with smoke filtering and heldout/shadow finalist evaluation
-- deterministic self-play export and local Python value-training pipeline
-- Prose-first outer-loop scaffold for candidate generation, worktrees, screening, authoritative evaluation, and promotion
-- tiny hybrid policy+value branch with Rust-side prior/leaf integration and Python/Modal training/export workers
-- current promoted submission uses a breadth-heavier `6/8/3/3` search shape, while `incumbent_current.json` preserves the prior `6/6/4/4` baseline
+See [docs/RETROSPECTIVE.md](./docs/RETROSPECTIVE.md) for the full post-mortem, including reflections on the ML pipeline that didn't ship.
 
-## Repository layout
+## Repository Layout
 
-- `rust/engine`: game state, rules, map generation, oracle loading, and Java parity tools
-- `rust/bot`: contest bot, search, evaluator, arena binary, and self-play export
-- `python/train`: local self-play orchestration, smoke/arena runners, value training, outer-loop workers, and results ledger
-- `automation/outerloop`: Prose programs and research constitution for the outer loop
-- `src/test/java/com/codingame/game`: Java oracle and real referee runner helpers
-- `docs/memory`: repo-local status and handoff notes
-
-## Quick checks
-
-Run the Rust test suite:
-
-```bash
-cargo test --workspace
+```
+c_bot/           # Final C bot — maximin search + heuristic eval
+  bot.c          # Main bot source (submitted as submission/c_bot_maximin.c)
+rust/
+  engine/        # Java-parity Rust game simulator
+  bot/           # Rust contest bot (search + optional hybrid NN, superseded by C bot)
+python/
+  train/         # ML training pipeline (teacher, distillation, arena, self-play)
+  bot/           # Pure-NN Python bot experiment (numpy inference)
+submission/      # Submission artifacts (C, Rust, Python variants)
+tools/           # Submission generators, sweep launchers, monitoring scripts
+docs/            # Documentation and retrospective
+config/          # Training configs and specs
 ```
 
-Run the Rust-vs-Java parity sweep:
+## The Bot
 
-```bash
-cargo run -q -p snakebot-engine --bin java_diff -- --init-source rust --seeds 50 --turns 20
-```
+### Architecture
 
-Run the Java smoke canary:
+- **Search**: Exhaustive 1-ply maximin over all my-actions x all opponent-actions
+- **Pruning**: Alpha-beta cutoffs with heuristic action ordering
+- **Deepening**: Top 6 x worst 8 opponent x 3x3 child branching
+- **Scoring**: CVaR blend — `(1-lambda)*worst + lambda*cvar3`, lambda adaptive (0.05 ahead, 0.25 behind)
+- **Time budget**: 950ms first turn, 45ms subsequent
 
-```bash
-python3 -m python.train.java_smoke \
-  --boss-count 1 \
-  --mirror-count 1 \
-  --candidate-config rust/bot/configs/submission_current.json
-```
+### Evaluation Function
 
-Run the Rust arena harness:
+| Term | Weight | Description |
+|------|--------|-------------|
+| body | 120 | Raw body length difference |
+| loss | 18 | Loss count difference |
+| mobility | 7.5 | Legal commands per bird |
+| apple | 60 | Competitive apple race: (opp_dist-my_dist)/(total+1) |
+| coverage | 40 | Distinct-apple greedy matching |
+| stability | 10 | Supported birds |
+| breakpoint | 25 | Count of length>=4 birds difference |
+| fragile | 8 | Proximity to opponent's short birds |
+| danger | ~100 | Wall proximity (halved from initial) |
+| gravity | ~40 | Unsupported/facing-up penalties (halved) |
 
-```bash
-python3 -m python.train.run_arena \
-  --candidate-config rust/bot/configs/submission_current.json \
-  --incumbent-config rust/bot/configs/incumbent_current.json \
-  --anchor-config rust/bot/configs/anchor_root_only.json
-```
+## The ML Pipeline (built but not shipped)
 
-If the candidate is behavior-identical to the incumbent, `run_arena` now returns an informational no-op instead of treating it as a meaningful self-match.
+The repo also contains a complete teacher-student distillation pipeline that was built during the competition but ultimately didn't improve on the heuristic bot:
 
-Run the staged search sweep helper:
+1. **Distributed self-play** — 4 machines, 164K seeds, 36.8M positions, bitpacked binary format
+2. **128ch/8-block SE-ResNet teacher** — Muon optimizer, val_corr=0.6728, policy_acc=90.32%
+3. **Student distillation** — 12ch to 64ch variants, soft targets with T=2.0
+4. **f16 Unicode encoding** — 1 char/weight (5.3x denser than base64), fits 32ch in 100K char limit
+5. **CodinGame timing probes** — measured actual CNN inference on CG servers
 
-```bash
-python3 -m python.train.sweep_search
-```
+Key finding: **policy priors hurt at <85% accuracy, and value-only integration was marginal (+0.94 body diff)**. Hand-tuned heuristics iterated faster and produced better results.
 
-That script prebuilds the release `arena` binary once, runs a smoke-suite topology screening pass first, then a heldout/shadow authoritative finalist pass, and can optionally promote the winning config.
+## Leaderboard History
 
-Generate a single-file Rust submission artifact:
+| Date | Bot | League Rank | Global Rank |
+|------|-----|-------------|-------------|
+| Mar 11 | Rust search 6/8/3/3 | Bronze | 147/1,108 |
+| Mar 12 | Same | Silver 108/763 | 108/1,388 |
+| Mar 13 | Hybrid NN 12ch value-only | Silver 187/892 | 187/1,478 |
+| Mar 19 | PUCT attempt (broken) | Silver 1,081/1,096 | 1,495/2,118 |
+| Mar 19 | C maximin v1 | Silver 529/1,098 | 951/2,130 |
+| Mar 19 | C maximin v2 (new eval) | Silver 367/1,102 | 790/2,137 |
+| Mar 19 | C maximin v3b (CVaR+coverage) | Silver 106/1,099 | 532/2,138 |
+| Mar 20 | v3b settled | **Silver 73/1,099** | **508/2,144** |
+| Mar 20 | C maximin v6 (final) | Silver 124/1,107 | 578/2,161 |
 
-```bash
-python3 tools/generate_flattened_submission.py
-```
+## Cost
 
-That emits [`submission/flattened_main.rs`](./submission/flattened_main.rs) from the live Rust bot and compile-checks it with `rustc`. Regenerate it whenever `submission_current.json` or the live bot/engine logic changes.
+| Item | Cost |
+|------|------|
+| Modal GPU (teacher, distillation, sweeps) | ~$155 |
+| Modal memory overcharges | ~$119 |
+| Vast.ai (sweeps, zombie instances) | ~$15 |
+| Local compute (self-play on 4 machines) | $0 |
+| **Total** | **~$310** |
 
-Current limitation:
+~$310 spent, mostly on ML infrastructure that didn't make it into the final submission. See the [retrospective](./docs/RETROSPECTIVE.md) for reflections.
 
-- the flattened submission path is intentionally **search-only**
-- if a future promoted config enables the hybrid model, the generator currently fails explicitly until weight embedding for single-file submissions is implemented
-
-## Prose outer loop
-
-The repo now includes a Prose-first research lab scaffold:
-
-- [`automation/outerloop/program.md`](./automation/outerloop/program.md)
-- [`automation/outerloop/outerloop.prose`](./automation/outerloop/outerloop.prose)
-- [`python/train/outerloop`](./python/train/outerloop)
-
-The intended split is:
-
-- Prose owns orchestration
-- Python/Rust CLIs own deterministic work
-- Helios is an optional external cockpit/UI over `.prose/runs/...` and `artifacts/outerloop/...`
-
-Candidate artifacts live under:
-
-- `artifacts/outerloop/runs/<run_id>/manifest.json`
-- `artifacts/outerloop/runs/<run_id>/candidates/<candidate_id>/`
-
-Those artifacts are meant to be directly consumable by external tools like a Helios fork without inventing a second schema.
-
-## Self-play and training
-
-The self-play/export/training workflow is documented in:
-
-- [python/train/README.md](./python/train/README.md)
-
-That includes:
-
-- Rust-seed self-play as the default hot path
-- optional Java oracle map dumps
-- release-mode self-play export
-- parallel local data generation
-- grouped/deduped value-model training
-
-## Project memory
-
-The best starting point for project status and handoff notes is:
-
-- [docs/memory/README.md](./docs/memory/README.md)
-
-That index links to the short status note and the more detailed engine/search and training docs.
-
-## Git remotes
+## Git Remotes
 
 - `origin`: `https://github.com/oneiron-dev/codingame-winter-2026.git`
 - `upstream`: `https://github.com/CodinGame/WinterChallenge2026-Exotec.git`

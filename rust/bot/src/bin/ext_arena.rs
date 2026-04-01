@@ -157,7 +157,7 @@ impl BotProcess {
         let child = Command::new(path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()?;
         let stdin = child.stdin.unwrap();
         let stdout = child.stdout.unwrap();

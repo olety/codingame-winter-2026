@@ -27,6 +27,8 @@ c_bot/bot
 c_bot/bot_old
 c_bot/bot_new
 c_bot/bot_debug
-c_bot/bot_v3*
+c_bot/bot_v*
+c_bot/bot_min
 /submission/timing_probe*
 /submission/flattened_distill02*
+.claude/
