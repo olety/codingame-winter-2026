@@ -127,7 +127,7 @@ Changing an eval weight in C and testing locally takes 2 minutes. Training a new
 
 ### ChatGPT Pro was genuinely useful
 
-When we were stuck on why PUCT failed, ChatGPT Pro (o1) diagnosed the root causes in one conversation: not real tree search, per-bird stats identical by construction, DUCT applied at wrong level, alive_bonus flattening growth. This saved hours of debugging.
+When we were stuck on why PUCT failed, ChatGPT Pro (5.4) diagnosed the root causes in one conversation: not real tree search, per-bird stats identical by construction, DUCT applied at wrong level, alive_bonus flattening growth. This saved hours of debugging.
 
 ## Technical Learnings Worth Preserving
 
@@ -168,7 +168,7 @@ When we were stuck on why PUCT failed, ChatGPT Pro (o1) diagnosed the root cause
 
 4. **Set a hard dollar budget before starting.** "I'll spend up to $50 on GPU compute" prevents the scope creep that turned a learning exercise into a $300 bill.
 
-5. **Use ChatGPT Pro / o1 earlier for debugging.** The PUCT diagnosis saved hours. Should have used it for the initial architecture decision too.
+5. **Use ChatGPT Pro earlier for debugging.** The PUCT diagnosis saved hours. Should have used it for the initial architecture decision too.
 
 ## Final Standings
 
